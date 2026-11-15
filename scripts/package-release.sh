@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# 打包发布产物：多架构 paneld 二进制 + install.sh + sha256
+# 打包发布产物：多架构 paneld 二进制 + install-panel.sh + sha256
 #
 #   ./scripts/package-release.sh            # 版本号取 git describe
 #   VERSION=3.0.0 ./scripts/package-release.sh
 #
 # 产物在 dist/ 下：
-#   flvx-paneld-linux-amd64 / -arm64   给 install.sh 下载用
-#   flvx-de-<version>.tar.gz           整套（含 install.sh、systemd 单元、文档）
+#   flvx-paneld-linux-amd64 / -arm64   给 install-panel.sh 下载用
+#   flvx-de-<version>.tar.gz           整套（含 install-panel.sh、systemd 单元、文档）
 #   SHA256SUMS
 set -euo pipefail
 
@@ -44,7 +44,7 @@ done
 
 echo "▶ 打包整套"
 tar czf "$OUT/flvx-de-$VERSION.tar.gz" \
-	-C "$ROOT" install.sh README.md docs/native-deploy.md deploy/native
+	-C "$ROOT" install-panel.sh README.md docs/native-deploy.md deploy/native
 
 echo "▶ 校验和"
 (

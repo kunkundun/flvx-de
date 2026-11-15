@@ -26,17 +26,17 @@ paneld（systemd）
 ### 方式 A：脚本（仓库公开时最省事）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install-panel.sh | sudo bash
 ```
 
 自定义端口 / 路径：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install-panel.sh \
   | sudo bash -s -- --port 8443 --path /kunta
 ```
 
-> 私有仓库需要带 token：`sudo GH_TOKEN=<你的token> bash install.sh`
+> 私有仓库需要带 token：`sudo GH_TOKEN=<你的token> bash install-panel.sh`
 
 ### 方式 B：先构建，再一键装（推荐，私有仓库/离线都适用）
 
@@ -52,17 +52,17 @@ cd go-backend && ./scripts/build-panel.sh      # 自动：构建前端 → embed
 
 ```bash
 scp go-backend/bin/paneld root@服务器:/root/flvx-paneld
-scp install.sh            root@服务器:/root/
-ssh root@服务器 'sudo bash /root/install.sh /root/flvx-paneld'
+scp install-panel.sh      root@服务器:/root/
+ssh root@服务器 'sudo bash /root/install-panel.sh /root/flvx-paneld'
 ```
 
-也可以把 `flvx-paneld` 和 `install.sh` 放在同一目录，直接 `sudo bash install.sh`。
+也可以把 `flvx-paneld` 和 `install-panel.sh` 放在同一目录，直接 `sudo bash install-panel.sh`。
 
 ### 方式 C：从 Release 安装
 
 ```bash
 sudo FLVX_BINARY_URL=https://github.com/kunkundun/flvx-de/releases/download/<版本>/flvx-paneld-linux-amd64 \
-  bash install.sh
+  bash install-panel.sh
 ```
 
 安装脚本做的事：建 `flvx` 系统用户 → 建目录 → 生成 `JWT_SECRET` → 原子替换二进制（保留 `.prev` 可回滚）
@@ -110,7 +110,7 @@ kill -HUP $(systemctl show -p MainPID --value flvx-paneld)   # 按数据库设�
 升级（保留 `.prev`，健康检查失败自动回滚）：
 
 ```bash
-sudo bash install.sh /root/flvx-paneld-new      # 或 deploy/native/upgrade-paneld.sh
+sudo bash install-panel.sh /root/flvx-paneld-new      # 或 deploy/native/upgrade-paneld.sh
 ```
 
 回滚：
@@ -122,7 +122,7 @@ sudo cp /usr/local/bin/flvx-paneld.prev /usr/local/bin/flvx-paneld && sudo syste
 卸载（保留数据库）：
 
 ```bash
-sudo bash install.sh --uninstall
+sudo bash install-panel.sh --uninstall
 ```
 
 ## 目录布局
@@ -170,13 +170,13 @@ VERSION=3.0.0 ./scripts/package-release.sh
 | 运行方式 | docker + 2~3 个容器 | 1 个进程 |
 | 内存 | 200MB+ | 40~60MB |
 | 前端 | 独立 nginx 容器 | `go:embed` 进二进制 |
-| 面板「一键升级」 | 面板内点击 | `install.sh <新二进制>`（保留回滚） |
+| 面板「一键升级」 | 面板内点击 | `install-panel.sh <新二进制>`（保留回滚） |
 | 端口/路径/TLS | 改 compose + 重建容器 | 设置页保存，3 秒生效 |
 
 ## 已知限制
 
 - 节点通道目前是明文 HTTP/WS（内网场景）；TLS 请在节点端口前面做
-- 面板自升级（在面板里点一下把自己更新）在原生方案下线，改由 `install.sh` 完成
+- 面板自升级（在面板里点一下把自己更新）在原生方案下线，改由 `install-panel.sh` 完成
 - nftables 转发模式需要面板能 SSH 到节点，且节点上可执行 `nft`（root 或 `sudo -n nft`）
 - 只支持 Linux（systemd / OpenRC 均可运行，脚本按 systemd 写；Alpine 需自行写 OpenRC 单元）
 
