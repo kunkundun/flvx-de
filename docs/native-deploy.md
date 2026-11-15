@@ -28,7 +28,7 @@ paneld（systemd: flvx-paneld）
 |---|---|---|
 | 面板端口 | `panel_port` | UI + API 的监听端口 |
 | 节点连接端口 | `panel_agent_port` | agent 专用；节点安装命令里的地址要写 `服务器IP:这个端口` |
-| 面板路径 | `panel_path` | `/` 或 `/kunta`；**运行期可改，无需重新构建前端** |
+| 面板路径 | `panel_path` | `/`（根路径）或任意子路径；**运行期可改，无需重新构建前端** |
 | 隐藏根路径 | `panel_hide_root` | 路径非 `/` 时，`/` 返回 404（开）或 302 跳到面板路径（关） |
 | 启用 HTTPS | `panel_tls_enable` | 面板端口本身改用 HTTPS，不额外占用 443 |
 | 证书 / 私钥路径 | `panel_cert_file` / `panel_key_file` | 服务器绝对路径；证书按 mtime 热加载 |

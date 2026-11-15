@@ -14,7 +14,7 @@ paneld（systemd）
 
 - **单进程**：跑起来只有一个 `flvx-paneld`，约 40～60MB 内存
 - **前端内嵌**：`go:embed` 把面板前端编进二进制，升级/迁移只搬一个文件
-- **面板路径运行期可改**：`/` 或 `/kunta`，保存即生效，**不用重新构建前端**
+- **面板路径运行期可改**：可以挂在 `/`，也可以挂在任意子路径，保存即生效，**不用重新构建前端**
 - **同端口 HTTPS**：面板端口自己就能上 HTTPS，不额外占用 443；HTTP 访问会 301 到同端口；证书按文件变化热加载
 - **端口/路径/证书都在设置页里改**：面板「网站配置」直接调，保存后约 3 秒重绑监听；新配置起不来会自动回退
 - **节点通道独立端口**：只放行 `/system-info`、`/flow/*`，不暴露面板页面与管理 API
@@ -23,20 +23,21 @@ paneld（systemd）
 
 ## 一键安装
 
-### 方式 A：脚本（仓库公开时最省事）
+### 方式 A：一键脚本
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install-panel.sh | sudo bash
+# 仓库不是公开仓库时，先拿到脚本即可（见下方说明）
+sudo bash install-panel.sh
 ```
 
 自定义端口 / 路径：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install-panel.sh \
-  | sudo bash -s -- --port 8443 --path /kunta
+sudo bash install-panel.sh --port 8443 --path /my-panel
 ```
 
-> 私有仓库需要带 token：`sudo GH_TOKEN=<你的token> bash install-panel.sh`
+> 私有仓库无法匿名访问 `raw.githubusercontent.com`，把 `install-panel.sh` 拷到服务器后执行即可；
+> 想直接 `curl` 一行装完，需要仓库公开，或者带上 token（`GH_TOKEN`）走 Releases 下载二进制。
 
 ### 方式 B：先构建，再一键装（推荐，私有仓库/离线都适用）
 
@@ -90,7 +91,7 @@ sudo FLVX_BINARY_URL=https://github.com/kunkundun/flvx-de/releases/download/<版
 |---|---|
 | 面板端口 | UI + API 的监听端口，默认 6366 |
 | 节点连接端口 | agent 专用，默认 6365；只提供 `/system-info`、`/flow/*` |
-| 面板路径 | `/` 或 `/kunta` 等子路径，运行期可改 |
+| 面板路径 | `/`（根路径）或任意子路径（如 `/my-panel`），运行期可改 |
 | 隐藏根路径 | 路径非 `/` 时：开 = `/` 返回 404；关 = `/` 302 跳到面板路径 |
 | 启用 HTTPS | 面板端口本身改用 HTTPS（不占 443）；HTTP 访问 301 到 https 同端口 |
 | 证书 / 私钥路径 | 服务器绝对路径，建议放 `/etc/flvx/certs/`；文件更新自动热加载 |
