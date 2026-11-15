@@ -12,8 +12,13 @@ ROOT=$(pwd)
 FRONTEND="$ROOT/../vite-frontend"
 OUT="${OUT:-$ROOT/bin/paneld}"
 
+PNPM="pnpm"
+command -v pnpm >/dev/null 2>&1 || PNPM="npx --yes pnpm@10"
+# 本机 Node 版本不在 package.json 的 engines 里时也能构建（CI 用官方 Node 版本即可）
+export npm_config_engine_strict="${npm_config_engine_strict:-false}"
+
 echo "▶ 构建前端"
-(cd "$FRONTEND" && pnpm install --frozen-lockfile >/dev/null && pnpm run build >/dev/null)
+(cd "$FRONTEND" && $PNPM install --frozen-lockfile >/dev/null && $PNPM run build >/dev/null)
 
 echo "▶ 拷贝 dist 到 go-backend/internal/webserver/dist"
 rm -rf "$ROOT/internal/webserver/dist"

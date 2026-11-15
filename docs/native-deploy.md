@@ -49,6 +49,19 @@ paneld（systemd: flvx-paneld）
 
 ## 安装 / 升级
 
+**推荐直接用根目录的一键脚本 `install.sh`**（建用户、生成 JWT_SECRET、原子替换、装 systemd、启动/回滚都在里面）：
+
+```bash
+# 本机构建
+cd go-backend && ./scripts/build-panel.sh
+# 上传并安装（重复执行即升级）
+scp bin/paneld root@服务器:/root/flvx-paneld
+scp install.sh  root@服务器:/root/
+ssh root@服务器 'sudo bash /root/install.sh /root/flvx-paneld'
+```
+
+下面是最小化手工步骤（不使用脚本时参考）：
+
 构建（在源码目录）：
 
 ```bash

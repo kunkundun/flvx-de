@@ -1,804 +1,301 @@
-#!/bin/sh
-# shellcheck shell=bash
+#!/usr/bin/env bash
+# FLVX 面板一键安装 / 升级 / 卸载（单二进制，无 Docker）
+#
+#   # 1) 一键（仓库公开时）
+#   curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install.sh | sudo bash
+#
+#   # 2) 已经拿到二进制（推荐：本机构建后 scp 上来）
+#   sudo bash install.sh /root/flvx-paneld
+#
+#   # 3) 从指定 URL 拉二进制
+#   sudo FLVX_BINARY_URL=https://.../flvx-paneld-linux-amd64 bash install.sh
+#
+#   # 4) 卸载
+#   sudo bash install.sh --uninstall
+#
+# 可选参数：
+#   --port <n>           面板端口（默认 6366，仅首次安装生效，之后在面板设置页改）
+#   --agent-port <n>     节点连接端口（默认 6365）
+#   --path </xxx>        面板路径（默认 /）
+#   --version <v>        下载 Release 时指定版本（默认 latest）
+#   --no-start           只安装不启动
+set -euo pipefail
 
-# Alpine 默认不带 Bash。先用系统自带的 /bin/sh 安装/切换到 Bash，
-# 后续主体继续使用 Bash 语法，避免要求用户手动准备运行环境。
-if [ -z "${BASH_VERSION:-}" ]; then
-  if command -v bash >/dev/null 2>&1; then
-    exec bash "$0" "$@"
-  fi
+REPO="kunkundun/flvx-de"
+SERVICE_NAME="flvx-paneld"
+BIN_DST="/usr/local/bin/flvx-paneld"
+CONF_DIR="/etc/flvx"
+ENV_FILE="$CONF_DIR/paneld.env"
+DATA_DIR="/var/lib/flvx"
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-  if [ -f /etc/alpine-release ] && command -v apk >/dev/null 2>&1; then
-    if [ "$(id -u)" -eq 0 ]; then
-      apk add --no-cache bash
-    elif command -v sudo >/dev/null 2>&1; then
-      sudo apk add --no-cache bash
-    elif command -v doas >/dev/null 2>&1; then
-      doas apk add --no-cache bash
-    else
-      echo "❌ Alpine 安装需要 root 权限，或已配置 sudo/doas。" >&2
-      exit 1
-    fi
+PORT=6366
+AGENT_PORT=6365
+PANEL_PATH="/"
+VERSION=""
+BIN_ARG=""
+DO_START=1
+DO_UNINSTALL=0
+TMP_DIR=""
 
-    exec bash "$0" "$@"
-  fi
+log() { printf '%s\n' "$*"; }
+die() { printf '❌ %s\n' "$*" >&2; exit 1; }
+need_root() { [ "$(id -u)" = "0" ] || die "请用 root 执行（sudo bash $0 ...）"; }
+cleanup() { [ -n "$TMP_DIR" ] && rm -rf "$TMP_DIR" || true; }
+trap cleanup EXIT
 
-  echo "❌ 此安装脚本需要 Bash。" >&2
-  exit 1
+# ── 参数解析 ─────────────────────────────────────────────────────────
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--uninstall) DO_UNINSTALL=1 ;;
+	--port)
+		PORT="${2:-}"
+		shift
+		;;
+	--agent-port)
+		AGENT_PORT="${2:-}"
+		shift
+		;;
+	--path)
+		PANEL_PATH="${2:-}"
+		shift
+		;;
+	--version)
+		VERSION="${2:-}"
+		shift
+		;;
+	--no-start) DO_START=0 ;;
+	-h | --help)
+		sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+		exit 0
+		;;
+	-*) die "未知参数：$1" ;;
+	*) BIN_ARG="$1" ;;
+	esac
+	shift
+done
+
+# ── 卸载 ─────────────────────────────────────────────────────────────
+if [ "$DO_UNINSTALL" = "1" ]; then
+	need_root
+	log "▶ 停止并移除服务"
+	systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+	rm -f "$SERVICE_FILE"
+	systemctl daemon-reload
+
+	log "▶ 删除程序与配置（保留数据库 $DATA_DIR/gost.db）"
+	rm -f "$BIN_DST" "$BIN_DST.prev" "$BIN_DST.rollback"
+	rm -rf "$CONF_DIR"
+
+	log "▶ 删除用户"
+	userdel flvx 2>/dev/null || true
+
+	log ""
+	log "✅ 已卸载。数据库仍在 $DATA_DIR（确认不需要可手动 rm -rf $DATA_DIR）"
+	exit 0
 fi
 
-# GitHub repo used for release downloads
-REPO="Sagit-chu/flux-panel"
+need_root
 
-# 固定版本号（Release 构建时自动填充，留空则获取最新版）
-PINNED_VERSION=""
+# ── 环境检查 ─────────────────────────────────────────────────────────
+command -v systemctl >/dev/null 2>&1 || die "需要 systemd（Debian/Ubuntu/CentOS 等）"
+command -v curl >/dev/null 2>&1 || die "需要 curl"
 
-# 获取系统架构
-get_architecture() {
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64)
-            echo "amd64"
-            ;;
-        aarch64|arm64)
-            echo "arm64"
-            ;;
-        *)
-            echo "amd64"  # 默认使用 amd64
-            ;;
-    esac
+case "$(uname -m)" in
+x86_64 | amd64) ARCH=amd64 ;;
+aarch64 | arm64) ARCH=arm64 ;;
+*) die "不支持的架构：$(uname -m)（提供 amd64 / arm64 预编译包，其它架构请自行构建）" ;;
+esac
+
+TMP_DIR=$(mktemp -d)
+
+# ── 取得二进制 ───────────────────────────────────────────────────────
+fetch_binary() {
+	local target="$1"
+
+	if [ -n "$BIN_ARG" ]; then
+		[ -f "$BIN_ARG" ] || die "找不到二进制：$BIN_ARG"
+		log "▶ 使用本地二进制：$BIN_ARG"
+		cp -f "$BIN_ARG" "$target"
+		return 0
+	fi
+
+	# 脚本同目录下如果放了 flvx-paneld，优先用它
+	local script_dir
+	script_dir=$(cd "$(dirname "$0")" && pwd)
+	if [ -f "$script_dir/flvx-paneld" ]; then
+		log "▶ 使用脚本同目录的 flvx-paneld"
+		cp -f "$script_dir/flvx-paneld" "$target"
+		return 0
+	fi
+
+	local url="${FLVX_BINARY_URL:-}"
+	if [ -z "$url" ]; then
+		if [ -n "$VERSION" ]; then
+			url="https://github.com/${REPO}/releases/download/${VERSION}/flvx-paneld-linux-${ARCH}"
+		else
+			url="https://github.com/${REPO}/releases/latest/download/flvx-paneld-linux-${ARCH}"
+		fi
+	fi
+
+	log "▶ 下载二进制：$url"
+	local auth=()
+	[ -n "${GH_TOKEN:-}" ] && auth=(-H "Authorization: token ${GH_TOKEN}")
+
+	if ! curl -fsSL "${auth[@]}" -o "$target" "$url"; then
+		cat >&2 <<EOF
+❌ 下载失败。
+
+可以改用下面任一方式：
+  1) 本机构建后上传：
+       cd go-backend && ./scripts/build-panel.sh
+       scp bin/paneld 服务器:/root/flvx-paneld
+       ssh 服务器 'sudo bash install.sh /root/flvx-paneld'
+  2) 走代理 / 指定地址：
+       sudo FLVX_BINARY_URL=<直链> bash install.sh
+  3) 私有仓库需要 token：
+       sudo GH_TOKEN=<你的 token> bash install.sh
+EOF
+		exit 1
+	fi
 }
 
-# 安装目录
-INSTALL_DIR="/etc/flux_agent"
-FLUX_AGENT_SYSTEMD_SERVICE_FILE="/etc/systemd/system/flux_agent.service"
-FLUX_AGENT_OPENRC_SERVICE_FILE="/etc/init.d/flux_agent"
-LEGACY_GOST_BINARY="/usr/local/bin/gost"
-LEGACY_GOST_CONFIG_DIR="/etc/gost"
-LEGACY_GOST_SERVICE_FILE_ETC="/etc/systemd/system/gost.service"
-LEGACY_GOST_SERVICE_FILE_LIB="/lib/systemd/system/gost.service"
-LEGACY_GOST_SERVICE_FILE_USR_LIB="/usr/lib/systemd/system/gost.service"
-SERVICE_MANAGER="${SERVICE_MANAGER:-}"
+fetch_binary "$TMP_DIR/flvx-paneld"
+[ -s "$TMP_DIR/flvx-paneld" ] || die "拿到的二进制是空的"
+chmod 0755 "$TMP_DIR/flvx-paneld"
 
-# 镜像加速配置（可由面板传入或交互式询问）
-PROXY_ENABLED="${PROXY_ENABLED:-}"
-PROXY_URL="${PROXY_URL:-}"
+# ── 用户与目录 ───────────────────────────────────────────────────────
+log "▶ 创建用户与目录"
+id flvx >/dev/null 2>&1 || useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin flvx
+install -d -m 0750 -o flvx -g flvx "$DATA_DIR"
+install -d -m 0750 -g flvx "$CONF_DIR"
+install -d -m 0750 -g flvx "$CONF_DIR/certs"
 
-ensure_alpine_runtime_dependencies() {
-  [[ -f /etc/alpine-release ]] || return 0
+# ── 首次安装写配置 ───────────────────────────────────────────────────
+if [ ! -f "$ENV_FILE" ]; then
+	log "▶ 生成配置 $ENV_FILE"
+	JWT=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
+	cat >"$ENV_FILE" <<EOF
+# FLVX 面板配置（首次安装生成）
+# 端口 / 路径 / HTTPS 之后都在面板「网站配置」里改，数据库里的值优先于这里
+JWT_SECRET=$JWT
+DB_TYPE=sqlite
+DB_PATH=$DATA_DIR/gost.db
+TZ=Asia/Shanghai
 
-  local missing_packages=()
-  local privileged_command=""
+PANEL_PORT=$PORT
+AGENT_PORT=$AGENT_PORT
+PANEL_PATH=$PANEL_PATH
+PANEL_HIDE_ROOT=1
+EOF
+	chmod 0640 "$ENV_FILE"
+	chgrp flvx "$ENV_FILE"
+else
+	log "▶ 已存在配置，保留不动（升级模式）"
+fi
 
-  command -v curl >/dev/null 2>&1 || missing_packages+=(curl)
-  [[ -f /etc/ssl/certs/ca-certificates.crt ]] || missing_packages+=(ca-certificates)
+# ── 安装二进制 ───────────────────────────────────────────────────────
+log "▶ 安装二进制 → $BIN_DST"
+if [ -f "$BIN_DST" ]; then
+	cp -a "$BIN_DST" "${BIN_DST}.prev"
+fi
+install -m 0755 "$TMP_DIR/flvx-paneld" "${BIN_DST}.new"
+mv -f "${BIN_DST}.new" "$BIN_DST"
 
-  if [[ ${#missing_packages[@]} -eq 0 ]]; then
-    return 0
-  fi
-
-  if [[ $EUID -ne 0 ]]; then
-    if command -v sudo >/dev/null 2>&1; then
-      privileged_command="sudo"
-    elif command -v doas >/dev/null 2>&1; then
-      privileged_command="doas"
-    else
-      echo "❌ Alpine 安装需要 root 权限，或已配置 sudo/doas 来安装依赖: ${missing_packages[*]}。" >&2
-      return 1
-    fi
-  fi
-
-  echo "📦 Alpine 缺少运行依赖，正在安装: ${missing_packages[*]}"
-  if [[ -n "$privileged_command" ]]; then
-    "$privileged_command" apk add --no-cache "${missing_packages[@]}"
-  else
-    apk add --no-cache "${missing_packages[@]}"
-  fi
-}
-
-# 镜像加速
-maybe_proxy_url() {
-  local url="$1"
-
-  if [[ "$PROXY_ENABLED" == "false" ]]; then
-    echo "$url"
-    return
-  fi
-
-  local proxy="${PROXY_URL:-gcode.hostcentral.cc}"
-
-  if [[ "$proxy" == https://* || "$proxy" == http://* ]]; then
-    proxy="${proxy%/}"
-  else
-    proxy="https://${proxy%/}"
-  fi
-
-  echo "${proxy}/${url}"
-}
-
-ask_proxy_config() {
-  if [[ -n "$PROXY_ENABLED" ]]; then
-    return
-  fi
-
-  if [[ -n "$PROXY_URL" ]]; then
-    PROXY_ENABLED="true"
-    return
-  fi
-
-  echo ""
-  echo "==============================================="
-  echo "           GitHub 加速配置"
-  echo "==============================================="
-  if ! read -r -p "是否开启 GitHub 加速? (Y/n): " proxy_choice; then
-    proxy_choice=""
-  fi
-  case "$proxy_choice" in
-    n|N)
-      PROXY_ENABLED="false"
-      echo "已关闭加速，将直连 GitHub"
-      ;;
-    *)
-      PROXY_ENABLED="true"
-      if ! read -r -p "加速地址 (默认 gcode.hostcentral.cc): " input_url; then
-        input_url=""
-      fi
-      PROXY_URL="${input_url:-gcode.hostcentral.cc}"
-      echo "已开启加速: $PROXY_URL"
-      ;;
-  esac
-  echo "==============================================="
-}
-
-resolve_latest_release_tag() {
-  local effective_url tag api_tag latest_url api_url
-
-  latest_url="https://github.com/${REPO}/releases/latest"
-  api_url="https://api.github.com/repos/${REPO}/releases/latest"
-
-  effective_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' -L "$(maybe_proxy_url "$latest_url")" 2>/dev/null || true)
-  tag="${effective_url##*/}"
-  if [[ -n "$tag" && "$tag" != "latest" ]]; then
-    echo "$tag"
-    return 0
-  fi
-
-  api_tag=$(curl -fsSL "$(maybe_proxy_url "$api_url")" 2>/dev/null | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)
-  if [[ -n "$api_tag" ]]; then
-    echo "$api_tag"
-    return 0
-  fi
-
-  return 1
-}
-
-resolve_version() {
-  if [[ -n "${VERSION:-}" ]]; then
-    echo "$VERSION"
-    return 0
-  fi
-  if [[ -n "${FLUX_VERSION:-}" ]]; then
-    echo "$FLUX_VERSION"
-    return 0
-  fi
-  if [[ -n "${PINNED_VERSION:-}" ]]; then
-    echo "$PINNED_VERSION"
-    return 0
-  fi
-
-  if resolve_latest_release_tag; then
-    return 0
-  fi
-
-  echo "❌ 无法获取最新版本号。你可以手动指定版本，例如：VERSION=<版本号> ./install.sh" >&2
-  return 1
-}
-
-# 构建下载地址
-build_download_url() {
-    local ARCH=$(get_architecture)
-    echo "https://github.com/${REPO}/releases/download/${RESOLVED_VERSION}/gost-${ARCH}"
-}
-
-ensure_download_url_initialized() {
-  ensure_alpine_runtime_dependencies || return 1
-
-  if [[ -n "${DOWNLOAD_URL:-}" ]]; then
-    return 0
-  fi
-
-  RESOLVED_VERSION=$(resolve_version) || return 1
-  DOWNLOAD_URL=$(maybe_proxy_url "$(build_download_url)")
-}
-
-
-
-# 显示菜单
-show_menu() {
-  echo "==============================================="
-  echo "              管理脚本"
-  echo "==============================================="
-  echo "请选择操作："
-  echo "1. 安装"
-  echo "2. 更新"  
-  echo "3. 卸载"
-  echo "4. 退出"
-  echo "==============================================="
-}
-
-# 删除脚本自身
-delete_self() {
-  echo ""
-  echo "🗑️ 操作已完成，正在清理脚本文件..."
-  SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || realpath "$0" 2>/dev/null || echo "$0")"
-  sleep 1
-  rm -f "$SCRIPT_PATH" && echo "✅ 脚本文件已删除" || echo "❌ 删除脚本文件失败"
-}
-
-# 检查并安装 tcpkill
-check_and_install_tcpkill() {
-  # 检查 tcpkill 是否已安装
-  if command -v tcpkill &> /dev/null; then
-    return 0
-  fi
-  
-  # 检测操作系统类型
-  OS_TYPE=$(uname -s)
-  
-  # 检查是否需要 sudo
-  if [[ $EUID -ne 0 ]]; then
-    SUDO_CMD="sudo"
-  else
-    SUDO_CMD=""
-  fi
-  
-  if [[ "$OS_TYPE" == "Darwin" ]]; then
-    if command -v brew &> /dev/null; then
-      brew install dsniff &> /dev/null
-    fi
-    return 0
-  fi
-  
-  # 检测 Linux 发行版并安装对应的包
-  if [ -f /etc/os-release ]; then
-    . /etc/os-release
-    DISTRO=$ID
-  elif [ -f /etc/redhat-release ]; then
-    DISTRO="rhel"
-  elif [ -f /etc/debian_version ]; then
-    DISTRO="debian"
-  else
-    return 0
-  fi
-  
-  case $DISTRO in
-    ubuntu|debian)
-      $SUDO_CMD apt update &> /dev/null
-      $SUDO_CMD apt install -y dsniff &> /dev/null
-      ;;
-    centos|rhel|fedora)
-      if command -v dnf &> /dev/null; then
-        $SUDO_CMD dnf install -y dsniff &> /dev/null
-      elif command -v yum &> /dev/null; then
-        $SUDO_CMD yum install -y dsniff &> /dev/null
-      fi
-      ;;
-    alpine)
-      $SUDO_CMD apk add --no-cache dsniff &> /dev/null
-      ;;
-    arch|manjaro)
-      $SUDO_CMD pacman -S --noconfirm dsniff &> /dev/null
-      ;;
-    opensuse*|sles)
-      $SUDO_CMD zypper install -y dsniff &> /dev/null
-      ;;
-    gentoo)
-      $SUDO_CMD emerge --ask=n net-analyzer/dsniff &> /dev/null
-      ;;
-    void)
-      $SUDO_CMD xbps-install -Sy dsniff &> /dev/null
-      ;;
-  esac
-  
-  return 0
-}
-
-json_escape() {
-  local value="$1"
-  value=${value//\\/\\\\}
-  value=${value//\"/\\\"}
-  value=${value//$'\n'/\\n}
-  value=${value//$'\r'/\\r}
-  value=${value//$'\t'/\\t}
-  printf '%s' "$value"
-}
-
-write_flux_agent_config() {
-  local path="$1"
-  printf '{\n  "addr": "%s",\n  "secret": "%s"\n}\n' \
-    "$(json_escape "$SERVER_ADDR")" \
-    "$(json_escape "$SECRET")" > "$path"
-}
-
-ensure_service_manager() {
-  if [[ -n "$SERVICE_MANAGER" ]]; then
-    case "$SERVICE_MANAGER" in
-      systemd|openrc)
-        return 0
-        ;;
-      *)
-        echo "❌ 不支持的服务管理器: $SERVICE_MANAGER" >&2
-        return 1
-        ;;
-    esac
-  fi
-
-  # Alpine uses OpenRC even if a systemctl compatibility command happens to be installed.
-  if [[ -f /etc/alpine-release ]]; then
-    if command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
-      SERVICE_MANAGER="openrc"
-      return 0
-    fi
-  elif command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
-    SERVICE_MANAGER="systemd"
-    return 0
-  elif command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
-    SERVICE_MANAGER="openrc"
-    return 0
-  fi
-
-  echo "❌ 未检测到受支持的服务管理器（systemd 或 OpenRC）。" >&2
-  return 1
-}
-
-flux_agent_service_exists() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      [[ -f "$FLUX_AGENT_SYSTEMD_SERVICE_FILE" ]] || \
-        systemctl list-units --full -all 2>/dev/null | grep -Fq "flux_agent.service"
-      ;;
-    openrc)
-      [[ -f "$FLUX_AGENT_OPENRC_SERVICE_FILE" ]]
-      ;;
-  esac
-}
-
-stop_flux_agent_service() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      systemctl stop flux_agent 2>/dev/null || true
-      ;;
-    openrc)
-      rc-service flux_agent stop 2>/dev/null || true
-      ;;
-  esac
-}
-
-disable_flux_agent_service() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      systemctl disable flux_agent 2>/dev/null || true
-      ;;
-    openrc)
-      rc-update del flux_agent default 2>/dev/null || true
-      ;;
-  esac
-}
-
-write_flux_agent_service() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      mkdir -p "$(dirname "$FLUX_AGENT_SYSTEMD_SERVICE_FILE")"
-      cat > "$FLUX_AGENT_SYSTEMD_SERVICE_FILE" <<EOF
+# ── systemd ──────────────────────────────────────────────────────────
+log "▶ 写入 systemd 单元"
+cat >"$SERVICE_FILE" <<'EOF'
 [Unit]
-Description=Flux_agent Proxy Service
-After=network.target
+Description=FLVX panel (paneld)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/flux_agent
-Environment=GODEBUG=disablethp=1
-Restart=on-failure
-StandardOutput=null
-StandardError=null
+Type=simple
+User=flvx
+Group=flvx
+EnvironmentFile=/etc/flvx/paneld.env
+ExecStart=/usr/local/bin/flvx-paneld
+WorkingDirectory=/var/lib/flvx
+StateDirectory=flvx
+StateDirectoryMode=0750
+
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+TimeoutStopSec=20
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/flvx
+ReadOnlyPaths=/etc/flvx
 
 [Install]
 WantedBy=multi-user.target
 EOF
-      ;;
-    openrc)
-      mkdir -p "$(dirname "$FLUX_AGENT_OPENRC_SERVICE_FILE")"
-      cat > "$FLUX_AGENT_OPENRC_SERVICE_FILE" <<EOF
-#!/sbin/openrc-run
+systemctl daemon-reload
+systemctl enable "$SERVICE_NAME" >/dev/null
 
-name="flux_agent"
-description="Flux_agent Proxy Service"
-command="$INSTALL_DIR/flux_agent"
-directory="$INSTALL_DIR"
-command_background="yes"
-pidfile="/run/\${RC_SVCNAME}.pid"
-output_log="/dev/null"
-error_log="/dev/null"
+if [ "$DO_START" = "1" ]; then
+	log "▶ 启动服务"
+	systemctl restart "$SERVICE_NAME"
+	sleep 3
+	if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+		echo "❌ 服务启动失败，最近日志：" >&2
+		journalctl -u "$SERVICE_NAME" -n 30 --no-pager >&2 || true
+		exit 1
+	fi
+fi
 
-depend() {
-  need net
+# 面板可能已经在设置页改过端口/路径，优先用数据库里的值（python3 只是可选增强）
+read_setting() { # $1=键名 $2=默认值
+	local value=""
+	if command -v python3 >/dev/null 2>&1; then
+		value=$(python3 -c 'import sqlite3,sys
+key, default = sys.argv[1], sys.argv[2]
+try:
+    con = sqlite3.connect("file:/var/lib/flvx/gost.db?mode=ro", uri=True)
+    row = con.execute("SELECT value FROM vite_config WHERE name = ?", (key,)).fetchone()
+    print((row[0] if row and row[0] else default).strip())
+except Exception:
+    print(default)' "$1" "$2" 2>/dev/null || true)
+	fi
+	[ -n "$value" ] || value="$2"
+	echo "$value"
 }
+
+if [ -f "$DATA_DIR/gost.db" ]; then
+	PORT=$(read_setting panel_port "$PORT")
+	AGENT_PORT=$(read_setting panel_agent_port "$AGENT_PORT")
+	PANEL_PATH=$(read_setting panel_path "$PANEL_PATH")
+fi
+
+IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+[ -n "${IP:-}" ] || IP="<服务器IP>"
+URL_PATH="/"
+[ -n "$PANEL_PATH" ] && [ "$PANEL_PATH" != "/" ] && URL_PATH="/$(printf '%s' "$PANEL_PATH" | sed -e 's#^/*##' -e 's#/*$##')/"
+
+cat <<EOF
+
+✅ FLVX 面板已就绪
+
+   面板地址 : http://${IP}:${PORT}${URL_PATH}
+   节点端口 : ${IP}:${AGENT_PORT}   （节点安装命令里的地址填这个）
+   初始账号 : admin_user / admin_user（首次登录会强制改密码）
+   配置文件 : ${ENV_FILE}
+   数据文件 : ${DATA_DIR}/gost.db
+
+   常用命令 :
+     systemctl status ${SERVICE_NAME}
+     journalctl -u ${SERVICE_NAME} -f
+     sudo bash install.sh --uninstall        # 卸载（保留数据库）
+
+   下一步 :
+     1. 浏览器打开面板，改掉初始密码
+     2. 「网站配置 → 面板后端地址」填 ${IP}:${AGENT_PORT}
+     3. 「节点 → 新增」→ 复制安装命令到节点机执行
+
+   想改端口 / 路径 / HTTPS：直接在面板「网站配置」里改，保存后约 3 秒生效
 EOF
-      chmod +x "$FLUX_AGENT_OPENRC_SERVICE_FILE"
-      ;;
-  esac
-}
-
-enable_and_start_flux_agent_service() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      systemctl daemon-reload
-      systemctl enable flux_agent
-      systemctl start flux_agent
-      ;;
-    openrc)
-      rc-update add flux_agent default
-      rc-service flux_agent start
-      ;;
-  esac
-}
-
-start_flux_agent_service() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      systemctl start flux_agent
-      ;;
-    openrc)
-      rc-service flux_agent start
-      ;;
-  esac
-}
-
-flux_agent_service_is_active() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      systemctl is-active --quiet flux_agent
-      ;;
-    openrc)
-      rc-service flux_agent status >/dev/null 2>&1
-      ;;
-  esac
-}
-
-flux_agent_service_status() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      systemctl is-active flux_agent 2>/dev/null || true
-      ;;
-    openrc)
-      rc-service flux_agent status 2>/dev/null || true
-      ;;
-  esac
-}
-
-remove_flux_agent_service() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      rm -f "$FLUX_AGENT_SYSTEMD_SERVICE_FILE"
-      systemctl daemon-reload 2>/dev/null || true
-      ;;
-    openrc)
-      rm -f "$FLUX_AGENT_OPENRC_SERVICE_FILE"
-      ;;
-  esac
-}
-
-flux_agent_service_status_hint() {
-  ensure_service_manager || return 1
-
-  case "$SERVICE_MANAGER" in
-    systemd)
-      echo "systemctl status flux_agent --no-pager"
-      ;;
-    openrc)
-      echo "rc-service flux_agent status"
-      ;;
-  esac
-}
-
-cleanup_legacy_gost_installation() {
-  local matched_service_files=()
-  local service_file=""
-  local removed_service_file="0"
-
-  for service_file in "$LEGACY_GOST_SERVICE_FILE_ETC" "$LEGACY_GOST_SERVICE_FILE_LIB" "$LEGACY_GOST_SERVICE_FILE_USR_LIB"; do
-    if [[ ! -f "$service_file" ]]; then
-      continue
-    fi
-    if ! grep -Fq "WorkingDirectory=$LEGACY_GOST_CONFIG_DIR" "$service_file"; then
-      continue
-    fi
-    if grep -Fq "ExecStart=$LEGACY_GOST_CONFIG_DIR/gost" "$service_file" || \
-      (grep -Fq "ExecStart=$LEGACY_GOST_BINARY" "$service_file" && [[ -f "$LEGACY_GOST_CONFIG_DIR/config.json" && -f "$LEGACY_GOST_CONFIG_DIR/gost.json" ]]); then
-      matched_service_files+=("$service_file")
-    fi
-  done
-
-  if [[ ${#matched_service_files[@]} -eq 0 ]]; then
-    return 0
-  fi
-
-  if [[ "$SERVICE_MANAGER" == "systemd" ]] && \
-    systemctl list-units --full -all 2>/dev/null | grep -Fq "gost.service"; then
-    systemctl stop gost 2>/dev/null || true
-    systemctl disable gost 2>/dev/null || true
-  fi
-
-  for service_file in "${matched_service_files[@]}"; do
-    if [[ -f "$service_file" ]]; then
-      rm -f "$service_file"
-      removed_service_file="1"
-    fi
-  done
-
-  if [[ -f "$LEGACY_GOST_BINARY" ]]; then
-    rm -f "$LEGACY_GOST_BINARY"
-  fi
-  if [[ -f "$LEGACY_GOST_CONFIG_DIR/gost" ]]; then
-    rm -f "$LEGACY_GOST_CONFIG_DIR/gost"
-  fi
-
-  if [[ "$removed_service_file" == "1" && "$SERVICE_MANAGER" == "systemd" ]]; then
-    systemctl daemon-reload 2>/dev/null || true
-  fi
-}
-
-
-# 获取用户输入的配置参数
-get_config_params() {
-  if [[ -z "$SERVER_ADDR" || -z "$SECRET" ]]; then
-    echo "请输入配置参数："
-    
-    if [[ -z "$SERVER_ADDR" ]]; then
-      read -p "服务器地址: " SERVER_ADDR
-    fi
-    
-    if [[ -z "$SECRET" ]]; then
-      read -p "密钥: " SECRET
-    fi
-    
-    if [[ -z "$SERVER_ADDR" || -z "$SECRET" ]]; then
-      echo "❌ 参数不完整，操作取消。"
-      exit 1
-    fi
-  fi
-}
-
-# 解析命令行参数
-while getopts "a:s:" opt; do
-  case $opt in
-    a) SERVER_ADDR="$OPTARG" ;;
-    s) SECRET="$OPTARG" ;;
-    *) echo "❌ 无效参数"; exit 1 ;;
-  esac
-done
-
-# 安装功能
-install_flux_agent() {
-  echo "🚀 开始安装 flux_agent..."
-
-  ask_proxy_config
-  ensure_download_url_initialized || exit 1
-
-  get_config_params
-
-  # 检查并安装 tcpkill
-  check_and_install_tcpkill
-  ensure_service_manager || exit 1
-
-  mkdir -p "$INSTALL_DIR"
-
-  local tmp_binary="$INSTALL_DIR/flux_agent.new"
-
-  # 停止并禁用已有服务
-  if flux_agent_service_exists; then
-    echo "🔍 检测到已存在的flux_agent服务"
-    stop_flux_agent_service
-    echo "🛑 停止服务"
-    disable_flux_agent_service
-    echo "🚫 禁用自启"
-  fi
-
-  # 下载 flux_agent
-  echo "⬇️ 下载 flux_agent 中..."
-  rm -f "$tmp_binary"
-  curl -L "$DOWNLOAD_URL" -o "$tmp_binary"
-  if [[ ! -f "$tmp_binary" || ! -s "$tmp_binary" ]]; then
-    rm -f "$tmp_binary"
-    echo "❌ 下载失败，请检查网络或下载链接。"
-    exit 1
-  fi
-  cleanup_legacy_gost_installation
-  mv "$tmp_binary" "$INSTALL_DIR/flux_agent"
-  chmod +x "$INSTALL_DIR/flux_agent"
-  echo "✅ 下载完成"
-
-  # 打印版本
-  echo "🔎 flux_agent 版本：$($INSTALL_DIR/flux_agent -V)"
-
-  # 写入 config.json (安装时总是创建新的)
-  CONFIG_FILE="$INSTALL_DIR/config.json"
-  echo "📄 创建新配置: config.json"
-  write_flux_agent_config "$CONFIG_FILE"
-
-  # 写入 gost.json
-  GOST_CONFIG="$INSTALL_DIR/gost.json"
-  if [[ -f "$GOST_CONFIG" ]]; then
-    echo "⏭️ 跳过配置文件: gost.json (已存在)"
-  else
-    echo "📄 创建新配置: gost.json"
-    cat > "$GOST_CONFIG" <<EOF
-{}
-EOF
-  fi
-
-  # 加强权限
-  chmod 600 "$INSTALL_DIR"/*.json
-
-  # 创建 systemd 或 OpenRC 服务
-  write_flux_agent_service
-
-  # 启动服务
-  enable_and_start_flux_agent_service
-
-  # 检查状态
-  echo "🔄 检查服务状态..."
-  if flux_agent_service_is_active; then
-    echo "✅ 安装完成，flux_agent服务已启动并设置为开机启动。"
-    echo "📁 配置目录: $INSTALL_DIR"
-    echo "🔧 服务状态: $(flux_agent_service_status)"
-  else
-    echo "❌ flux_agent服务启动失败，请执行以下命令查看状态："
-    flux_agent_service_status_hint
-  fi
-}
-
-# 更新功能
-update_flux_agent() {
-  echo "🔄 开始更新 flux_agent..."
-  
-  if [[ ! -d "$INSTALL_DIR" ]]; then
-    echo "❌ flux_agent 未安装，请先选择安装。"
-    return 1
-  fi
-
-  ask_proxy_config
-  ensure_download_url_initialized || return 1
-  
-  echo "📥 使用下载地址: $DOWNLOAD_URL"
-  
-  # 检查并安装 tcpkill
-  check_and_install_tcpkill
-  ensure_service_manager || return 1
-  
-  # 先下载新版本
-  echo "⬇️ 下载最新版本..."
-  rm -f "$INSTALL_DIR/flux_agent.new"
-  curl -L "$DOWNLOAD_URL" -o "$INSTALL_DIR/flux_agent.new"
-  if [[ ! -f "$INSTALL_DIR/flux_agent.new" || ! -s "$INSTALL_DIR/flux_agent.new" ]]; then
-    echo "❌ 下载失败。"
-    return 1
-  fi
-  cleanup_legacy_gost_installation
-
-  # 停止服务
-  if flux_agent_service_exists; then
-    echo "🛑 停止 flux_agent 服务..."
-    stop_flux_agent_service
-  fi
-
-  # 替换文件
-  mv "$INSTALL_DIR/flux_agent.new" "$INSTALL_DIR/flux_agent"
-  chmod +x "$INSTALL_DIR/flux_agent"
-  
-  # 打印版本
-  echo "🔎 新版本：$($INSTALL_DIR/flux_agent -V)"
-
-  # 重启服务
-  echo "🔄 重启服务..."
-  start_flux_agent_service
-  
-  echo "✅ 更新完成，服务已重新启动。"
-}
-
-# 卸载功能
-uninstall_flux_agent() {
-  echo "🗑️ 开始卸载 flux_agent..."
-  ensure_service_manager || return 1
-  
-  read -p "确认卸载 flux_agent 吗？此操作将删除所有相关文件 (y/N): " confirm
-  if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-    echo "❌ 取消卸载"
-    return 0
-  fi
-
-  # 停止并禁用服务
-  if flux_agent_service_exists; then
-    echo "🛑 停止并禁用服务..."
-    stop_flux_agent_service
-    disable_flux_agent_service
-  fi
-
-  # 删除服务文件
-  if [[ -f "$FLUX_AGENT_SYSTEMD_SERVICE_FILE" || -f "$FLUX_AGENT_OPENRC_SERVICE_FILE" ]]; then
-    remove_flux_agent_service
-    echo "🧹 删除服务文件"
-  fi
-
-  # 删除安装目录
-  if [[ -d "$INSTALL_DIR" ]]; then
-    rm -rf "$INSTALL_DIR"
-    echo "🧹 删除安装目录: $INSTALL_DIR"
-  fi
-
-  echo "✅ 卸载完成"
-}
-
-# 主逻辑
-main() {
-  # 如果提供了命令行参数，直接执行安装
-  if [[ -n "$SERVER_ADDR" && -n "$SECRET" ]]; then
-    install_flux_agent
-    delete_self
-    exit 0
-  fi
-
-  # 显示交互式菜单
-  while true; do
-    show_menu
-    read -p "请输入选项 (1-4): " choice
-    
-    case $choice in
-      1)
-        install_flux_agent
-        delete_self
-        exit 0
-        ;;
-      2)
-        update_flux_agent
-        delete_self
-        exit 0
-        ;;
-      3)
-        uninstall_flux_agent
-        delete_self
-        exit 0
-        ;;
-      4)
-        echo "👋 退出脚本"
-        delete_self
-        exit 0
-        ;;
-      *)
-        echo "❌ 无效选项，请输入 1-4"
-        echo ""
-        ;;
-    esac
-  done
-}
-
-# 执行主函数
-main

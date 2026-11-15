@@ -1,255 +1,186 @@
-# FLVX
+# FLVX · 原生部署版（flvx-de）
 
-> **联系我们**: [Telegram群组](https://t.me/flvxchannel)
+把 FLVX 转发面板做成**一个静态二进制**：面板界面、管理 API、节点通道全部由同一个进程提供，
+**不需要 Docker、不需要 nginx、不需要容器编排**。
 
+```
+paneld（systemd）
+├─ 面板端口 :6366   /（内嵌前端）+ /api/v1/ + /system-info(type=0)
+└─ 节点端口 :6365   /system-info(type=1) + /flow/*     ← 面板页面和 API 在这里一律 404
+└─ SQLite  /var/lib/flvx/gost.db（业务数据 + 面板自己的设置）
+```
 
 ## 特性
 
-- 支持按 **隧道账号级别** 管理流量转发数量，可用于用户/隧道配额控制
-- 支持 **TCP** 和 **UDP** 协议的转发
-- 支持两种转发模式：**端口转发** 与 **隧道转发**
-- 可针对 **指定用户的指定隧道进行限速** 设置
-- 支持配置 **单向或双向流量计费方式**，灵活适配不同计费模型
-- 提供灵活的转发策略配置，适用于多种网络场景
-- 面板分享，支持将节点分享给其他人，面板对接面板
-- 支持分组权限管理，隧道分组、用户分组
-- 支持批量功能，可以批量下发配置，启停等
-- 支持隧道修改配置、转发修改隧道
+- **单进程**：跑起来只有一个 `flvx-paneld`，约 40～60MB 内存
+- **前端内嵌**：`go:embed` 把面板前端编进二进制，升级/迁移只搬一个文件
+- **面板路径运行期可改**：`/` 或 `/kunta`，保存即生效，**不用重新构建前端**
+- **同端口 HTTPS**：面板端口自己就能上 HTTPS，不额外占用 443；HTTP 访问会 301 到同端口；证书按文件变化热加载
+- **端口/路径/证书都在设置页里改**：面板「网站配置」直接调，保存后约 3 秒重绑监听；新配置起不来会自动回退
+- **节点通道独立端口**：只放行 `/system-info`、`/flow/*`，不暴露面板页面与管理 API
+- 单机可跑（SQLite），也支持 PostgreSQL
+- 转发能力沿用 FLVX：TCP/UDP、端口转发与隧道转发、限速限流、流量统计与套餐计费、分组权限、面板互联、nftables 转发模式等
 
+## 一键安装
 
-## 构建环境
-
-Go 后端和 agent 的最低编译版本为 **Go 1.26.10**；若使用 Go 1.27，须为 **1.27.3 或更新补丁版**。前端与 skill 发布使用 **Node.js 22.23.4**（见 `.node-version`），本地也支持 24.22.1+ 或 26.12.1+。前端使用 `pnpm@10.28.1`。
-
-这些版本包含 2026 年 10 月的运行时安全修复。已有部署还需重新构建并更新后端镜像及所有 agent 二进制，详见 [安全排查与升级说明](docs/security/2026-10-runtime-updates.md)。
-
-## 部署流程
----
-### 让 AI Agent 帮你安装（复制即用）
-
-将下面整段提示词复制给能执行终端命令的 AI Agent（如 Codex、Claude Code）。Agent 已运行在目标 Linux 服务器上时可直接安装；远程安装时，提供 SSH 主机别名或连接方式，使用已有 SSH 密钥登录即可，无需把私钥贴进对话。
-
-```text
-请帮我在目标 Linux 服务器上安装 FLVX 流量转发面板，直接执行安装并完成验证。
-
-项目仓库：https://github.com/Sagit-chu/flvx
-安装文档：https://github.com/Sagit-chu/flvx/blob/main/doc/install.md
-
-1. 确认目标服务器：如果当前终端就在目标 Linux 服务器上，直接使用当前环境；否则使用我提供的 SSH 连接。缺少连接信息时，只询问必要信息，确认目标后再执行安装。
-2. 先阅读项目 README、安装文档及将要执行的安装脚本，检查系统、架构、root/sudo 权限、Docker、Compose、端口占用和已有 FLVX 容器、数据卷及部署文件。已有部署时先确认是更新还是新装，保留原配置和数据。
-3. 新安装默认使用仓库标记为 latest 的 Release、Docker Compose、SQLite，部署目录 /opt/flvx-panel，前端端口 6366、后端端口 6365。我已指定的版本、目录或端口优先；端口冲突时先与我确认替代端口。
-4. 缺少依赖时按该发行版的官方方式安装 Docker Engine 和 Compose 插件。进入部署目录，从项目 Releases 下载所选版本的 panel_install.sh，先检查下载成功和脚本内容，再执行。使用交互式终端操作菜单，选择“安装面板”并按上述配置输入；以脚本实际提示为准。
-5. 默认直连 GitHub，可设置 PROXY_ENABLED=false；连接失败时说明原因，再与我确认是否使用代理。脚本可能修改 Docker IPv6 配置并重启 Docker；若会影响现有服务，先说明影响并确认。保留现有防火墙和 SSH 规则，仅按需放行实际使用的面板端口；云安全组无法操作时列出需要我放行的端口。
-6. 安装后检查 Compose 服务状态、后端健康检查、前端 HTTP 页面及后端 /flow/test 的响应，并从实际访问端验证连通性。失败时查看相关日志并修复后重试；受网络或权限限制无法完成的检查要明确说明，不能直接宣称安装成功。
-7. 最后给我实际安装版本、部署目录、访问地址、验证结果，以及在该目录查看状态、查看日志和重启服务的命令。说明默认管理员账号和密码均为 admin_user，提醒首次登录立即修改密码；不要输出 .env 中的 JWT_SECRET、数据库密码等密钥。
-```
-
-需要安装转发节点时，告诉 Agent 按[节点端部署文档](doc/install.md#二节点端部署)操作，并提供节点服务器、面板后端地址及从面板获取的节点接入密钥；安装完成后以服务正常运行且面板显示节点在线为准。
-
-### Docker Compose部署
-#### 快速部署（安装最新版）
-面板端：
-```bash
-curl -L https://raw.githubusercontent.com/Sagit-chu/flux-panel/main/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
-```
-节点端：
-```bash
-curl -L https://raw.githubusercontent.com/Sagit-chu/flux-panel/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
-```
-
-#### 安装特定版本
-从 [Releases](https://github.com/Sagit-chu/flux-panel/releases) 页面复制对应版本的安装命令，脚本会自动安装该版本而非最新版。
-
-面板端（以 2.1.9-beta6 为例）：
-```bash
-curl -L https://github.com/Sagit-chu/flux-panel/releases/download/2.1.9-beta6/panel_install.sh -o panel_install.sh && chmod +x panel_install.sh && ./panel_install.sh
-```
-节点端（以 2.1.9-beta6 为例）：
-```bash
-curl -L https://github.com/Sagit-chu/flux-panel/releases/download/2.1.9-beta6/install.sh -o install.sh && chmod +x install.sh && ./install.sh
-```
-
-#### PostgreSQL 部署（Docker Compose）
-
-安装脚本会根据环境自动下载对应的 Compose 配置并保存为 `docker-compose.yml`。默认仍使用 SQLite，切换到 PostgreSQL 只需要配置环境变量。
-
-1) 在 `docker-compose` 同目录创建或修改 `.env`：
+### 方式 A：脚本（仓库公开时最省事）
 
 ```bash
-JWT_SECRET=replace_with_your_secret
-BACKEND_PORT=6365
-FRONTEND_PORT=6366
-
-DB_TYPE=postgres
-DATABASE_URL=postgres://flux_panel:replace_with_strong_password@postgres:5432/flux_panel?sslmode=disable
-
-POSTGRES_DB=flux_panel
-POSTGRES_USER=flux_panel
-POSTGRES_PASSWORD=replace_with_strong_password
+curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install.sh | sudo bash
 ```
 
-> 📌 使用安装脚本部署时，`POSTGRES_PASSWORD` 会自动随机生成并写入 `.env`。
-
-2) 启动服务：
+自定义端口 / 路径：
 
 ```bash
-docker compose up -d
+curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install.sh \
+  | sudo bash -s -- --port 8443 --path /kunta
 ```
 
-3) 如果你想继续使用 SQLite，保留 `DB_TYPE=sqlite`（或不设置 `DB_TYPE`）即可。
+> 私有仓库需要带 token：`sudo GH_TOKEN=<你的token> bash install.sh`
 
-#### 通行证密钥登录（可选）
+### 方式 B：先构建，再一键装（推荐，私有仓库/离线都适用）
 
-通行证密钥登录默认关闭，需要管理员在部署环境中主动启用。它不依赖 Cloudflare Turnstile，但用户必须在验证码可用时先用密码登录并绑定密钥；未绑定的账号不能用此功能绕过验证码。原密码登录始终可用。
-
-**新部署与旧版本升级：**新安装生成的 `.env` 默认没有 `FLVX_WEBAUTHN_ORIGIN`。升级到支持通行证密钥的版本也**不会自动启用**：安装脚本保留已有 `.env`，不会向其中添加该变量。如果手动升级时保留了旧版 `docker-compose.yml`，还需检查 `backend.environment` 是否包含下文的变量传递项。未设置该变量时，仅更新镜像或版本号后看不到入口是预期行为。
-
-1. 在实际部署目录的 `.env` 中添加浏览器访问面板时的公开前端 origin，将示例域名换成自己的域名：
-
-   ```dotenv
-   FLVX_WEBAUTHN_ORIGIN=https://panel.example.com
-   ```
-
-   必须使用完整 HTTPS origin（协议、域名、必要时的端口），不能带路径、查询参数或尾部 `/`。仅本机开发可用 `http://localhost:3000` 或 `http://127.0.0.1:3000`。经反向代理访问时仍填浏览器地址栏中的**前端** origin，不填容器地址、后端监听地址或代理转发头；API 即使在另一个域名，也不改变此值。自行部署时将该变量传给 `paneld` 进程。
-
-2. 确认实际使用的 `docker-compose.yml` 在 `backend` 服务的 `environment` 下有以下传递项；新版 Compose 模板已包含，旧模板若缺失需补上：
-
-   ```yaml
-   FLVX_WEBAUTHN_ORIGIN: ${FLVX_WEBAUTHN_ORIGIN:-}
-   ```
-
-   在该部署目录运行 `docker compose up -d --force-recreate backend`，使新环境变量进入后端容器。后端重建期间，面板 API 会短暂中断。容器恢复后重新加载前端页面；如果 PWA 提示“发现新版本”，选择“刷新”，也可以用新的无痕窗口核对是否仍加载旧页面。
-
-3. 用户照常用密码登录，桌面端点右上角“个人资料”，手机端点底部“我的”（均进入 `/profile`）；在页面顶部的“通行证密钥”卡片输入**当前密码**、可选名称，点击“绑定通行证密钥”并完成设备解锁。新绑定要求设备支持可发现凭据（resident key），不支持的设备会在绑定时失败。绑定或删除均需当前密码，且用户只能管理自己账号的密钥。
-
-4. 以后在登录页直接点击“选择通行证密钥登录”，由设备选择账号并解锁，**无需先填写用户名**。账号被停用时密钥登录也会被拒绝。撤销密钥仍到个人资料页输入当前密码并删除。
-
-   旧版本绑定时只“优先”请求可发现凭据，现有密钥是否能直接选账号取决于当时的设备，不能按绑定版本统一判定或批量删除。若设备不显示某把旧密钥，请使用密码登录，在个人资料页删除该密钥并重新绑定；确认新密钥与密码恢复途径可用后再清理其他旧密钥。登录页不提供用户名密钥回退。
-
-**入口未显示时，按顺序检查：**
-
-1. 在部署目录运行 `docker compose exec backend printenv FLVX_WEBAUTHN_ORIGIN`，仅检查这一项是否为预期的公开前端 origin；不要贴出完整 `docker compose config` 或其他环境变量，以免泄露密码和密钥。若为空，检查 `.env` 和实际 Compose 模板的 `backend.environment`，然后按步骤 2 重建后端。
-2. 向浏览器实际调用的后端地址发送公开状态请求，例如将以下示例地址替换为自己的 API 地址后运行 `curl -sS -X POST 'https://api.example.com/api/v1/user/passkey/status' -H 'Content-Type: application/json' -d '{}'`。应返回 `code: 0` 且 `data.enabled: true`；若为 `false`，后端尚未接受有效配置。此接口无需登录或提供密码。
-3. 在访问面板的浏览器控制台检查 `window.isSecureContext` 为 `true`，且 `typeof window.PublicKeyCredential` 不是 `"undefined"`。普通公网 HTTP 页面或不支持 WebAuthn 的浏览器不会显示入口。确认后刷新页面，并查看 `/api/v1/user/passkey/status` 的实际网络响应。
-4. 若状态已启用且浏览器满足条件，检查 `docker compose images frontend` 中的前端镜像版本，并按步骤 2 的 PWA 提示刷新或使用无痕窗口。登录页按钮与个人资料页卡片均不存在时，通常是旧前端页面或状态请求未成功；只有其中一个缺失时，记录页面地址和该请求的响应再排查。
-
-**安全配置与恢复：**未设置或设置错误时，通行证密钥接口拒绝新的绑定和登录，登录页与个人资料页不显示对应入口；密码登录不受影响。不要把不可信的请求 `Host` / `X-Forwarded-Host` 当作可信 origin。域名变化会改变 RP ID，旧域名下绑定的密钥不能用于新域名；迁移时需保留原域名或可用的密码登录途径，再在新域名重新绑定。仅更改同一域名的端口也需同步更新此 origin。正在进行的密钥挑战只保存在后端内存中，重启后需重新开始；多副本部署需要共享会话方案，未实现前请保持单个后端实例。
-
-建议保留至少一种可用的密码恢复途径。数据库级备份会保留密钥记录；当前面板的 JSON 导出不包含通行证密钥，使用 JSON 导入迁移后，用户需要通过密码登录并重新绑定。
-
-#### 从 SQLite 迁移到 PostgreSQL
-
-如果你是通过 `panel_install.sh` 安装面板，推荐直接使用脚本菜单一键迁移：
+本机（macOS/Linux 均可，需要 Go 1.26.10+ 与 Node 22）：
 
 ```bash
-./panel_install.sh
-# 选择 4. 迁移到 PostgreSQL
+git clone <本仓库> flvx-de && cd flvx-de
+cd go-backend && ./scripts/build-panel.sh      # 自动：构建前端 → embed → 编译
+# 产物：go-backend/bin/paneld
 ```
 
-脚本会自动完成 SQLite 备份、PostgreSQL 启动、`pgloader` 导入、`.env` 中 `DB_TYPE`/`DATABASE_URL` 更新，并重启服务。
-
-如果你希望手动迁移，以下示例基于 Docker Volume `sqlite_data`（项目默认配置）与 `pgloader`：
-
-1) 停止服务并备份 SQLite 数据：
+上传并安装到服务器：
 
 ```bash
-docker compose down
-docker run --rm -v sqlite_data:/data -v "$(pwd)":/backup alpine sh -c "cp /data/gost.db /backup/gost.db.bak"
+scp go-backend/bin/paneld root@服务器:/root/flvx-paneld
+scp install.sh            root@服务器:/root/
+ssh root@服务器 'sudo bash /root/install.sh /root/flvx-paneld'
 ```
 
-2) 仅启动 PostgreSQL：
+也可以把 `flvx-paneld` 和 `install.sh` 放在同一目录，直接 `sudo bash install.sh`。
+
+### 方式 C：从 Release 安装
 
 ```bash
-docker compose up -d postgres
+sudo FLVX_BINARY_URL=https://github.com/kunkundun/flvx-de/releases/download/<版本>/flvx-paneld-linux-amd64 \
+  bash install.sh
 ```
 
-3) 使用 `pgloader` 迁移：
+安装脚本做的事：建 `flvx` 系统用户 → 建目录 → 生成 `JWT_SECRET` → 原子替换二进制（保留 `.prev` 可回滚）
+→ 装 systemd 单元 → 启动 → 打印访问地址。
+
+装完会打印：
+
+```
+面板地址 : http://<IP>:6366/
+节点端口 : <IP>:6365   （节点安装命令里的地址填这个）
+初始账号 : admin_user / admin_user（首次登录强制改密码）
+```
+
+## 安装后三步
+
+1. 浏览器打开面板，**改掉初始密码**
+2. 「网站配置 → 面板后端地址」填 `服务器IP:6365`（节点端口）
+3. 「节点 → 新增」填节点服务器 IP 与端口范围 → 复制安装命令 → 到节点机执行
+
+节点机上会装成 `flux_agent.service`（agent 二进制从 GitHub Release 下载）。
+
+## 面板设置（网站配置页）
+
+| 设置项 | 说明 |
+|---|---|
+| 面板端口 | UI + API 的监听端口，默认 6366 |
+| 节点连接端口 | agent 专用，默认 6365；只提供 `/system-info`、`/flow/*` |
+| 面板路径 | `/` 或 `/kunta` 等子路径，运行期可改 |
+| 隐藏根路径 | 路径非 `/` 时：开 = `/` 返回 404；关 = `/` 302 跳到面板路径 |
+| 启用 HTTPS | 面板端口本身改用 HTTPS（不占 443）；HTTP 访问 301 到 https 同端口 |
+| 证书 / 私钥路径 | 服务器绝对路径，建议放 `/etc/flvx/certs/`；文件更新自动热加载 |
+
+保存后约 3 秒生效：地址变了会自动跳转提示；危险变更（隐藏根路径、开关 HTTPS）会二次确认；
+新配置绑定失败（端口被占用、证书不可用）会自动回退到上一份配置，不会把面板锁在门外。
+
+## 常用命令
 
 ```bash
-source .env
-docker run --rm --network gost-network -v sqlite_data:/sqlite dimitri/pgloader:latest pgloader /sqlite/gost.db "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}"
+systemctl status flvx-paneld            # 状态
+journalctl -u flvx-paneld -f            # 日志（含每个请求）
+systemctl restart flvx-paneld           # 重启（改 /etc/flvx/paneld.env 后需要）
+kill -HUP $(systemctl show -p MainPID --value flvx-paneld)   # 按数据库设置重绑监听
 ```
 
-4) 切换后端到 PostgreSQL 并启动：
+升级（保留 `.prev`，健康检查失败自动回滚）：
 
 ```bash
-source .env
-export DB_TYPE=postgres
-export DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
-docker compose up -d
+sudo bash install.sh /root/flvx-paneld-new      # 或 deploy/native/upgrade-paneld.sh
 ```
 
-5) 迁移完成后，登录面板检查用户、隧道、转发、节点数据是否正确。
+回滚：
 
-#### 默认管理员账号
+```bash
+sudo cp /usr/local/bin/flvx-paneld.prev /usr/local/bin/flvx-paneld && sudo systemctl restart flvx-paneld
+```
 
-- **账号**: admin_user
-- **密码**: admin_user
+卸载（保留数据库）：
 
-> ⚠️ 首次登录后请立即修改默认密码！
+```bash
+sudo bash install.sh --uninstall
+```
 
----
-## Original Project
-- **Name**: flux-panel
-- **Source**: https://github.com/bqlpfy/flux-panel
-- **License**: Apache License 2.0
+## 目录布局
 
-## Modifications
-This fork (FLVX) is no longer a light patch on top of the upstream project. It has been deeply reworked, with both backend and frontend rebuilt around a Go-based architecture.
+```
+/usr/local/bin/flvx-paneld        二进制（内嵌前端）
+/usr/local/bin/flvx-paneld.prev   上一版本，回滚用
+/etc/flvx/paneld.env              JWT_SECRET、数据库路径、首次安装的默认端口
+/etc/flvx/certs/                  证书目录
+/var/lib/flvx/gost.db             SQLite 数据库
+/etc/systemd/system/flvx-paneld.service
+```
 
-### 1. Backend (Rewritten)
-- **Removed**: The original `springboot-backend/` (Java/Spring Boot) implementation.
-- **Added**: A fully rewritten `go-backend/` service (Go), including updated data and API handling for panel management.
+备份只需要一个文件：`/var/lib/flvx/gost.db`（建议 `sqlite3 gost.db ".backup 备份文件"`，或停服务后拷贝）。
 
-### 2. Frontend (Reworked)
-- **Reworked**: `vite-frontend/` has been substantially rebuilt to match the new backend contract and current UI layer architecture.
-- **Updated**: Dashboard pages/components and interaction flows for the current React/Vite stack.
+## 从源码构建（开发）
 
-### 3. Forwarding Stack (Modified)
-- **Modified**: `go-gost/` forwarding agent wrapper.
-- **Modified**: `go-gost/x/` local fork of `github.com/go-gost/x`.
+```bash
+# 后端 + 前端（一条命令，产物 go-backend/bin/paneld）
+cd go-backend && ./scripts/build-panel.sh
 
-### 4. Mobile Clients (Removed)
-- **Removed**: `android-app/` source code.
-- **Removed**: `ios-app/` source code.
+# 只跑前端开发服务器（路径走 /，接口代理到后端）
+cd vite-frontend && pnpm dev
 
-### 5. Deployment & Project Infrastructure
-- **Updated**: Docker deployment templates and installer output flow (IPv4/IPv6 compose variants).
-- **Updated**: Release installation scripts (`install.sh`, `panel_install.sh`) and supporting automation.
-- **Added/Updated**: Project-level engineering documentation (for example `AGENTS.md`).
+# 打多架构发布包（linux/amd64 + linux/arm64 + 校验和 + 整包）
+VERSION=3.0.0 ./scripts/package-release.sh
+```
 
----
+环境要求：**Go 1.26.10+**、**Node 22.23.4+**（pnpm 10.28.1）。后端构建使用 `CGO_ENABLED=0`，产物是静态二进制。
 
+## 端口与网络
 
-## 免责声明
+| 端口 | 用途 | 建议暴露范围 |
+|---|---|---|
+| 6366（面板端口） | 面板 UI + 管理 API | 内网 / VPN；要公网访问请上 HTTPS + 反代 + 认证 |
+| 6365（节点端口） | 节点 agent 通道 | 只对节点所在网络开放；公网接入请在其前面做 TLS（agent 会自动用 `wss`） |
 
-本项目仅供个人学习与研究使用，基于开源项目进行二次开发。  
+节点端口只接受 4 个路径，其它一律 404：`/system-info`、`/flow/test`、`/flow/upload`、`/flow/config`。
+这些端点靠节点 `secret` 鉴权，但仍建议加防火墙白名单，只放行自己的节点 IP。
 
-使用本项目所带来的任何风险均由使用者自行承担，包括但不限于：  
+## 与 Docker 版 FLVX 的差异
 
-- 配置不当或使用错误导致的服务异常或不可用；  
-- 使用本项目引发的网络攻击、封禁、滥用等行为；  
-- 服务器因使用本项目被入侵、渗透、滥用导致的数据泄露、资源消耗或损失；  
-- 因违反当地法律法规所产生的任何法律责任。  
+| | Docker 版 | 本版本 |
+|---|---|---|
+| 运行方式 | docker + 2~3 个容器 | 1 个进程 |
+| 内存 | 200MB+ | 40~60MB |
+| 前端 | 独立 nginx 容器 | `go:embed` 进二进制 |
+| 面板「一键升级」 | 面板内点击 | `install.sh <新二进制>`（保留回滚） |
+| 端口/路径/TLS | 改 compose + 重建容器 | 设置页保存，3 秒生效 |
 
-本项目为开源的流量转发工具，仅限合法、合规用途。  
-使用者必须确保其使用行为符合所在国家或地区的法律法规。  
+## 已知限制
 
-**作者不对因使用本项目导致的任何法律责任、经济损失或其他后果承担责任。**  
-**禁止将本项目用于任何违法或未经授权的行为，包括但不限于网络攻击、数据窃取、非法访问等。**  
+- 节点通道目前是明文 HTTP/WS（内网场景）；TLS 请在节点端口前面做
+- 面板自升级（在面板里点一下把自己更新）在原生方案下线，改由 `install.sh` 完成
+- nftables 转发模式需要面板能 SSH 到节点，且节点上可执行 `nft`（root 或 `sudo -n nft`）
+- 只支持 Linux（systemd / OpenRC 均可运行，脚本按 systemd 写；Alpine 需自行写 OpenRC 单元）
 
-如不同意上述条款，请立即停止使用本项目。  
+## 许可与声明
 
-作者对因使用本项目所造成的任何直接或间接损失概不负责，亦不提供任何形式的担保、承诺或技术支持。  
-
-
-请务必在合法、合规、安全的前提下使用本项目。
-
----
-## ⭐ 喝杯咖啡！（USDT）
-
-| 网络       | 地址                                                                 |
-|------------|----------------------------------------------------------------------|
-| BNB(BEP20) | `0x271327ce49140e670eA0F772d9886BF90E9022Ee`                          |
-| TRC20      | `TARxZWggaxFqYgxGVBxPkyykgYKNmGndmE`                                  |
-| polygon    |  `0x271327ce49140e670eA0F772d9886BF90E9022Ee`    |
+基于 FLVX（Apache-2.0）源码改造，遵循同一许可。
+本项目为流量转发工具，仅供合法合规用途，请遵守所在国家或地区法律法规。

@@ -15,6 +15,9 @@ import (
 	"go-backend/internal/panelupgrade"
 )
 
+// version 由构建脚本注入：-X main.version=<版本>
+var version = "dev"
+
 func main() {
 	if len(os.Args) == 3 && os.Args[1] == "panel-upgrade-helper" {
 		if panelupgrade.RunHelper(os.Args[2]) != nil {
@@ -27,7 +30,7 @@ func main() {
 	if cfg.JWTSecret == "" {
 		log.Println("warning: JWT_SECRET is empty")
 	}
-	log.Printf("starting go-backend on %s (db=%s)", cfg.Addr, cfg.DBPath)
+	log.Printf("flvx-de %s starting (db=%s)", version, cfg.DBPath)
 
 	a, err := app.New(cfg)
 	if err != nil {
