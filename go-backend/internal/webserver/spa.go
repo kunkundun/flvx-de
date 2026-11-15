@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"io/fs"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -17,6 +18,21 @@ import (
 var embedded embed.FS
 
 const basePlaceholder = "__FLVX_BASE__"
+
+// 没有内嵌前端时的兜底页面（例如只 `go build ./...` 做编译检查、
+// 或从源码直接启动但没执行过 build-panel.sh）
+var fallbackIndex = []byte(`<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>FLVX</title>
+<style>body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f6f7fb;color:#1f2937;
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.card{max-width:560px;padding:28px 32px;background:#fff;border-radius:14px;box-shadow:0 8px 30px rgba(15,23,42,.08)}
+h1{font-size:18px;margin:0 0 10px}p{font-size:14px;line-height:1.7;color:#4b5563;margin:6px 0}
+code{background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:13px}</style></head>
+<body><div class="card"><h1>前端资源未构建</h1>
+<p>paneld 已启动，但这个二进制里没有内嵌面板前端。</p>
+<p>请用 <code>go-backend/scripts/build-panel.sh</code> 构建（会先构建 vite-frontend 再 embed 进二进制）。</p>
+<p>接口本身是可用的：<code>/api/v1/...</code>、<code>/flow/test</code>。</p>
+</div></body></html>`)
 
 // SPA 把内嵌的前端与后端 mux 合成一个 handler：
 //   - <前缀>/             → 静态文件 / index.html
@@ -42,7 +58,9 @@ func NewSPA(inner http.Handler, s Settings) (*SPA, error) {
 
 	rawIndex, err := fs.ReadFile(dist, "index.html")
 	if err != nil {
-		return nil, err
+		// 没有前端产物时不阻塞启动（CI 里的 go build / 纯接口使用场景）
+		log.Printf("警告：未内嵌前端（dist/index.html 缺失），面板页面将显示占位提示；请用 scripts/build-panel.sh 构建")
+		rawIndex = fallbackIndex
 	}
 
 	files := make(map[string][]byte, 64)

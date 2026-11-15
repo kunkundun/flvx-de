@@ -51,6 +51,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 面板前端会 go:embed 进 paneld，Go 任务需要先产出 dist
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      - name: Build frontend for embedding
+        working-directory: .
+        run: |
+          npm install -g pnpm@10.28.1
+          (cd vite-frontend && pnpm install --frozen-lockfile && pnpm run build)
+          rm -rf go-backend/internal/webserver/dist
+          mkdir -p go-backend/internal/webserver/dist
+          cp -R vite-frontend/dist/. go-backend/internal/webserver/dist/
+
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -93,6 +109,22 @@ jobs:
         working-directory: go-backend
     steps:
       - uses: actions/checkout@v4
+
+      # 面板前端会 go:embed 进 paneld，Go 任务需要先产出 dist
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      - name: Build frontend for embedding
+        working-directory: .
+        run: |
+          npm install -g pnpm@10.28.1
+          (cd vite-frontend && pnpm install --frozen-lockfile && pnpm run build)
+          rm -rf go-backend/internal/webserver/dist
+          mkdir -p go-backend/internal/webserver/dist
+          cp -R vite-frontend/dist/. go-backend/internal/webserver/dist/
+
 
       - name: Setup Go
         uses: actions/setup-go@v5
