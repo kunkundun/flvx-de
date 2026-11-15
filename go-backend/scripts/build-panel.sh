@@ -24,6 +24,7 @@ echo "▶ 拷贝 dist 到 go-backend/internal/webserver/dist"
 rm -rf "$ROOT/internal/webserver/dist"
 mkdir -p "$ROOT/internal/webserver/dist"
 cp -R "$FRONTEND/dist/." "$ROOT/internal/webserver/dist/"
+touch "$ROOT/internal/webserver/dist/.gitkeep"
 
 echo "▶ 编译 paneld"
 mkdir -p "$(dirname "$OUT")"

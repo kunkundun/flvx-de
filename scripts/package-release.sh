@@ -27,6 +27,7 @@ echo "▶ 构建前端"
 rm -rf "$ROOT/go-backend/internal/webserver/dist"
 mkdir -p "$ROOT/go-backend/internal/webserver/dist"
 cp -R "$ROOT/vite-frontend/dist/." "$ROOT/go-backend/internal/webserver/dist/"
+touch "$ROOT/go-backend/internal/webserver/dist/.gitkeep"
 
 mkdir -p "$OUT"
 
