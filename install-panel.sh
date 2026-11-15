@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # FLVX 面板一键安装 / 升级 / 卸载（单二进制，无 Docker）
 #
-#   # 1) 一键（把脚本放到服务器后执行）
-#   curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install.sh | sudo bash
+#   # 1) 一键（推荐）
+#   curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install-panel.sh | sudo bash
 #
-#   # 2) 已经拿到二进制（推荐：本机构建后 scp 上来）
+#   # 2) 已经拿到二进制（本机构建后 scp 上来）
 #   sudo bash install-panel.sh /root/flvx-paneld
 #
 #   # 3) 从指定 URL 拉二进制
