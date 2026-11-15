@@ -124,15 +124,6 @@ fetch_binary() {
 		return 0
 	fi
 
-	# 脚本同目录下如果放了 flvx-paneld，优先用它
-	local script_dir
-	script_dir=$(cd "$(dirname "$0")" && pwd)
-	if [ -f "$script_dir/flvx-paneld" ]; then
-		log "▶ 使用脚本同目录的 flvx-paneld"
-		cp -f "$script_dir/flvx-paneld" "$target"
-		return 0
-	fi
-
 	local asset="flvx-paneld-linux-${ARCH}"
 
 	# 1) 显式指定地址
@@ -184,8 +175,20 @@ fetch_binary() {
 	fi
 	log "▶ 下载二进制：$url"
 
-	if ! curl -fsSL --retry 3 -o "$target" "$url"; then
-		cat >&2 <<EOF
+	if curl -fsSL --retry 3 -o "$target" "$url"; then
+		return 0
+	fi
+
+	# 兜底：脚本同目录下放了 flvx-paneld
+	local script_dir
+	script_dir=$(cd "$(dirname "$0")" && pwd)
+	if [ -f "$script_dir/flvx-paneld" ]; then
+		log "▶ 下载不可用，改用脚本同目录的 flvx-paneld"
+		cp -f "$script_dir/flvx-paneld" "$target"
+		return 0
+	fi
+
+	cat >&2 <<EOF
 ❌ 下载失败。
 
 可以改用下面任一方式：
@@ -195,11 +198,10 @@ fetch_binary() {
        ssh 服务器 'sudo bash install-panel.sh /root/flvx-paneld'
   2) 走代理 / 指定地址：
        sudo FLVX_BINARY_URL=<直链> bash install-panel.sh
-  3) 私有仓库需要 token：
-       sudo GH_TOKEN=<你的 token> bash install-panel.sh
+  3) 私有仓库需要 token（走 GitHub API 下载）：
+       sudo GH_TOKEN=<你的 token> bash install-panel.sh --version <版本>
 EOF
-		exit 1
-	fi
+	exit 1
 }
 
 fetch_binary "$TMP_DIR/flvx-paneld"
