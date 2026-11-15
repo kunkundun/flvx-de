@@ -1,0 +1,25 @@
+/// <reference types="vite/client" />
+/// <reference types="vite-plugin-pwa/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_API_BASE?: string;
+  readonly VITE_APP_VERSION?: string;
+  readonly VITE_GITHUB_REPO?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
+interface Window {
+  /** 面板挂载路径，形如 "/" 或 "/kunta/" */
+  BASE_URL?: string;
+}
+
+declare module "virtual:pwa-register" {
+  export function registerSW(options?: {
+    immediate?: boolean;
+    onNeedRefresh?: () => void;
+    onOfflineReady?: () => void;
+  }): (reloadPage?: boolean) => Promise<void>;
+}
