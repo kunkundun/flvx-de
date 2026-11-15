@@ -5,13 +5,17 @@
 #   curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install.sh | sudo bash
 #
 #   # 2) 已经拿到二进制（推荐：本机构建后 scp 上来）
-#   sudo bash install.sh /root/flvx-paneld
+#   sudo bash install-panel.sh /root/flvx-paneld
 #
 #   # 3) 从指定 URL 拉二进制
-#   sudo FLVX_BINARY_URL=https://.../flvx-paneld-linux-amd64 bash install.sh
+#   sudo FLVX_BINARY_URL=https://.../flvx-paneld-linux-amd64 bash install-panel.sh
+#
+#   # 3b) 从 GitHub Release 下载（私有仓库需要 token）
+#   sudo GH_TOKEN=<token> bash install-panel.sh
+#   sudo GH_TOKEN=<token> bash install-panel.sh --version 3.0.0
 #
 #   # 4) 卸载
-#   sudo bash install.sh --uninstall
+#   sudo bash install-panel.sh --uninstall
 #
 # 可选参数：
 #   --port <n>           面板端口（默认 6366，仅首次安装生效，之后在面板设置页改）
@@ -129,20 +133,58 @@ fetch_binary() {
 		return 0
 	fi
 
-	local url="${FLVX_BINARY_URL:-}"
-	if [ -z "$url" ]; then
-		if [ -n "$VERSION" ]; then
-			url="https://github.com/${REPO}/releases/download/${VERSION}/flvx-paneld-linux-${ARCH}"
-		else
-			url="https://github.com/${REPO}/releases/latest/download/flvx-paneld-linux-${ARCH}"
+	local asset="flvx-paneld-linux-${ARCH}"
+
+	# 1) 显式指定地址
+	if [ -n "${FLVX_BINARY_URL:-}" ]; then
+		log "▶ 下载二进制：${FLVX_BINARY_URL}"
+		if curl -fsSL --retry 3 -o "$target" "$FLVX_BINARY_URL"; then
+			return 0
 		fi
+		die "下载失败：${FLVX_BINARY_URL}"
 	fi
 
-	log "▶ 下载二进制：$url"
-	local auth=()
-	[ -n "${GH_TOKEN:-}" ] && auth=(-H "Authorization: token ${GH_TOKEN}")
+	# 2) 私有仓库：release 资产必须走 API（github.com/.../releases/download 匿名或仅带 token 都会 404）
+	if [ -n "${GH_TOKEN:-}" ]; then
+		local api="https://api.github.com/repos/${REPO}/releases/latest"
+		[ -n "$VERSION" ] && api="https://api.github.com/repos/${REPO}/releases/tags/${VERSION}"
+		log "▶ 通过 GitHub API 下载 Release 资产（私有仓库）"
 
-	if ! curl -fsSL "${auth[@]}" -o "$target" "$url"; then
+		local meta asset_id
+		meta=$(curl -fsSL --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+			-H "Accept: application/vnd.github+json" "$api" || true)
+		[ -n "$meta" ] || die "取 release 信息失败（检查 GH_TOKEN 权限与版本号）"
+
+		asset_id=$(printf '%s' "$meta" | awk -v want="${asset}" '
+			/"id":[[:space:]]*[0-9]+/ {
+				if (match($0, /"id":[[:space:]]*[0-9]+/)) {
+					id = substr($0, RSTART, RLENGTH)
+					gsub(/[^0-9]/, "", id)
+				}
+			}
+			index($0, "\"name\": \"" want "\"") { print id; exit }
+		')
+
+		if [ -n "$asset_id" ]; then
+			if curl -fL --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+				-H "Accept: application/octet-stream" \
+				-o "$target" "https://api.github.com/repos/${REPO}/releases/assets/${asset_id}"; then
+				return 0
+			fi
+		fi
+		die "下载 release 资产失败（asset=${asset}）"
+	fi
+
+	# 3) 公开仓库：直链
+	local url
+	if [ -n "$VERSION" ]; then
+		url="https://github.com/${REPO}/releases/download/${VERSION}/${asset}"
+	else
+		url="https://github.com/${REPO}/releases/latest/download/${asset}"
+	fi
+	log "▶ 下载二进制：$url"
+
+	if ! curl -fsSL --retry 3 -o "$target" "$url"; then
 		cat >&2 <<EOF
 ❌ 下载失败。
 
@@ -150,11 +192,11 @@ fetch_binary() {
   1) 本机构建后上传：
        cd go-backend && ./scripts/build-panel.sh
        scp bin/paneld 服务器:/root/flvx-paneld
-       ssh 服务器 'sudo bash install.sh /root/flvx-paneld'
+       ssh 服务器 'sudo bash install-panel.sh /root/flvx-paneld'
   2) 走代理 / 指定地址：
-       sudo FLVX_BINARY_URL=<直链> bash install.sh
+       sudo FLVX_BINARY_URL=<直链> bash install-panel.sh
   3) 私有仓库需要 token：
-       sudo GH_TOKEN=<你的 token> bash install.sh
+       sudo GH_TOKEN=<你的 token> bash install-panel.sh
 EOF
 		exit 1
 	fi
@@ -290,7 +332,7 @@ cat <<EOF
    常用命令 :
      systemctl status ${SERVICE_NAME}
      journalctl -u ${SERVICE_NAME} -f
-     sudo bash install.sh --uninstall        # 卸载（保留数据库）
+     sudo bash install-panel.sh --uninstall        # 卸载（保留数据库）
 
    下一步 :
      1. 浏览器打开面板，改掉初始密码

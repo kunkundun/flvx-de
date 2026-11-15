@@ -61,9 +61,20 @@ ssh root@服务器 'sudo bash /root/install-panel.sh /root/flvx-paneld'
 
 ### 方式 C：从 Release 安装
 
+最新版本：https://github.com/kunkundun/flvx-de/releases
+
+私有仓库的 release 资产必须走 GitHub API（`gh` 或带 token 的 curl），安装脚本已经内置这条路径：
+
 ```bash
-sudo FLVX_BINARY_URL=https://github.com/kunkundun/flvx-de/releases/download/<版本>/flvx-paneld-linux-amd64 \
-  bash install-panel.sh
+# 指定 token（脚本会自动用 API 拉取对应架构的二进制）
+sudo GH_TOKEN=<你的token> bash install-panel.sh --version 3.0.0
+
+# 或者先自己下载再本地安装
+gh release download 3.0.0 --repo kunkundun/flvx-de --pattern 'flvx-paneld-linux-amd64'
+sudo bash install-panel.sh ./flvx-paneld-linux-amd64
+
+# 也可以直接指定地址
+sudo FLVX_BINARY_URL=<直链> bash install-panel.sh
 ```
 
 安装脚本做的事：建 `flvx` 系统用户 → 建目录 → 生成 `JWT_SECRET` → 原子替换二进制（保留 `.prev` 可回滚）
