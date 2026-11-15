@@ -26,18 +26,18 @@ paneld（systemd）
 ### 方式 A：一键脚本
 
 ```bash
-# 仓库不是公开仓库时，先拿到脚本即可（见下方说明）
-sudo bash install-panel.sh
+curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install-panel.sh | sudo bash
 ```
 
 自定义端口 / 路径：
 
 ```bash
-sudo bash install-panel.sh --port 8443 --path /my-panel
+curl -fsSL https://raw.githubusercontent.com/kunkundun/flvx-de/main/install-panel.sh \
+  | sudo bash -s -- --port 8443 --path /my-panel
 ```
 
-> 私有仓库无法匿名访问 `raw.githubusercontent.com`，把 `install-panel.sh` 拷到服务器后执行即可；
-> 想直接 `curl` 一行装完，需要仓库公开，或者带上 token（`GH_TOKEN`）走 Releases 下载二进制。
+脚本会自动判断架构（amd64/arm64）并从 [Releases](https://github.com/kunkundun/flvx-de/releases)
+下载对应的 `flvx-paneld` 二进制；重复执行即原地升级（保留 `.prev` 可回滚）。
 
 ### 方式 B：先构建，再一键装（推荐，私有仓库/离线都适用）
 

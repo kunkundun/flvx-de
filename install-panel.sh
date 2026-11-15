@@ -10,8 +10,7 @@
 #   # 3) 从指定 URL 拉二进制
 #   sudo FLVX_BINARY_URL=https://.../flvx-paneld-linux-amd64 bash install-panel.sh
 #
-#   # 3b) 从 GitHub Release 下载（私有仓库需要 token）
-#   sudo GH_TOKEN=<token> bash install-panel.sh
+#   # 3b) 从 GitHub Release 下载（仓库改为私有后需要 token）
 #   sudo GH_TOKEN=<token> bash install-panel.sh --version 3.0.0
 #
 #   # 4) 卸载
