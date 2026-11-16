@@ -31,16 +31,31 @@ touch "$ROOT/go-backend/internal/webserver/dist/.gitkeep"
 
 mkdir -p "$OUT"
 
+# 节点 agent 的下载来源（面板生成的安装命令会用这个仓库）
+GITHUB_REPO="${GITHUB_REPO:-kunkundun/flvx-de}"
+
 for arch in amd64 arm64; do
-	echo "▶ 编译 linux/$arch"
+	echo "▶ 编译 linux/$arch 面板"
 	(
 		cd "$ROOT/go-backend"
 		CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
 			go build -trimpath \
-			-ldflags="-s -w -X main.version=$VERSION" \
+			-ldflags="-s -w -X main.version=$VERSION -X go-backend/internal/http/handler.githubRepo=$GITHUB_REPO" \
 			-o "$OUT/flvx-paneld-linux-$arch" ./cmd/paneld
 	)
+
+	echo "▶ 编译 linux/$arch 节点 agent"
+	(
+		cd "$ROOT/go-gost"
+		CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+			go build -trimpath -ldflags="-s -w -X main.version=$VERSION" \
+			-o "$OUT/gost-$arch" .
+	)
 done
+
+echo "▶ 附带安装脚本"
+cp -f "$ROOT/install.sh" "$OUT/install.sh"
+cp -f "$ROOT/install-panel.sh" "$OUT/install-panel.sh"
 
 echo "▶ 打包整套"
 tar czf "$OUT/flvx-de-$VERSION.tar.gz" \
@@ -49,7 +64,7 @@ tar czf "$OUT/flvx-de-$VERSION.tar.gz" \
 echo "▶ 校验和"
 (
 	cd "$OUT"
-	sha256sum flvx-paneld-linux-* flvx-de-"$VERSION".tar.gz >SHA256SUMS
+	sha256sum flvx-paneld-linux-* gost-* install.sh install-panel.sh flvx-de-"$VERSION".tar.gz >SHA256SUMS
 	cat SHA256SUMS
 )
 

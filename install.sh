@@ -27,8 +27,8 @@ if [ -z "${BASH_VERSION:-}" ]; then
   exit 1
 fi
 
-# GitHub repo used for release downloads
-REPO="Sagit-chu/flux-panel"
+# GitHub repo used for release downloads（可用 REPO=owner/repo 覆盖）
+REPO="${REPO:-kunkundun/flvx-de}"
 
 # 固定版本号（Release 构建时自动填充，留空则获取最新版）
 PINNED_VERSION=""
@@ -61,8 +61,12 @@ LEGACY_GOST_SERVICE_FILE_USR_LIB="/usr/lib/systemd/system/gost.service"
 SERVICE_MANAGER="${SERVICE_MANAGER:-}"
 
 # 镜像加速配置（可由面板传入或交互式询问）
+# PROXY_ENABLED: auto（默认，直连+镜像测速择优）/ false（只直连）/ true（等同 auto）
 PROXY_ENABLED="${PROXY_ENABLED:-}"
 PROXY_URL="${PROXY_URL:-}"
+PROXY_CANDIDATES="${PROXY_CANDIDATES:-https://gh-proxy.com https://ghfast.top https://githubproxy.cc}"
+PROBE_BYTES="${PROBE_BYTES:-262144}"
+PROBE_TIMEOUT="${PROBE_TIMEOUT:-6}"
 
 ensure_alpine_runtime_dependencies() {
   [[ -f /etc/alpine-release ]] || return 0
@@ -97,23 +101,172 @@ ensure_alpine_runtime_dependencies() {
 }
 
 # 镜像加速
-maybe_proxy_url() {
-  local url="$1"
+# 把一个加速地址规范成 "https://host" 形式（无尾斜杠）
+normalize_proxy_prefix() {
+  local proxy="$1"
+  [[ -z "$proxy" ]] && return 0
+  if [[ "$proxy" != https://* && "$proxy" != http://* ]]; then
+    proxy="https://$proxy"
+  fi
+  echo "${proxy%/}"
+}
 
-  if [[ "$PROXY_ENABLED" == "false" ]]; then
-    echo "$url"
+# 测速：返回整数 KB/s，失败返回 0
+probe_speed() {
+  local url="$1" out code speed
+  out=$(curl -sL -m "$PROBE_TIMEOUT" -r "0-$((PROBE_BYTES - 1))" -o /dev/null \
+    -w '%{http_code} %{speed_download}' "$url" 2>/dev/null || true)
+  set -- $out
+  code="${1:-000}"
+  speed="${2:-0}"
+  case "$code" in
+    200 | 206) awk -v s="$speed" 'BEGIN { printf "%d", s / 1024 }' ;;
+    *) echo 0 ;;
+  esac
+}
+
+# 把探测结果写入安装目录与 systemd journal（装完后仍可追溯）
+record_route() {
+  local chosen="$1" speed="$2" table="$3"
+  local line route_file
+  route_file="${INSTALL_DIR:-/tmp}/install-route.txt"
+  line="route: chosen=${chosen:-direct} speed=${speed}KB/s"
+  mkdir -p "$(dirname "$route_file")" 2>/dev/null || true
+  {
+    echo "# FLYX agent 安装时的下载线路探测结果"
+    echo "time=$(date -Is 2>/dev/null || date)"
+    echo "repo=${REPO}"
+    echo "version=${RESOLVED_VERSION:-${VERSION:-latest}}"
+    echo "chosen=${chosen:-direct}"
+    echo "speed_kbps=${speed}"
+    echo "candidates:"
+    printf '%s\n' "$table"
+  } >"$route_file" 2>/dev/null || true
+  if command -v systemd-cat >/dev/null 2>&1; then
+    printf '%s\n%s\n' "$line" "$table" | systemd-cat -t flyx-install -p info 2>/dev/null || true
+  elif command -v logger >/dev/null 2>&1; then
+    logger -t flyx-install "$line" 2>/dev/null || true
+  fi
+  echo "📝 线路选择已记录：${route_file}（journalctl -t flyx-install 也可查）" >&2
+}
+
+# 选出最快的下载前缀："" 表示直连，其它为 "https://mirror"
+# 首次调用时并行探测一次，结果缓存到 RESOLVED_URL_PREFIX
+RESOLVED_URL_PREFIX=""
+RESOLVED_URL_PREFIX_DONE=""
+
+resolve_url_prefix() {
+  if [[ -n "$RESOLVED_URL_PREFIX_DONE" ]]; then
+    echo "$RESOLVED_URL_PREFIX"
     return
   fi
 
-  local proxy="${PROXY_URL:-gcode.hostcentral.cc}"
+  local mode="$PROXY_ENABLED"
+  [[ -z "$mode" ]] && mode="auto"
+  [[ "$mode" == "true" ]] && mode="auto"
 
-  if [[ "$proxy" == https://* || "$proxy" == http://* ]]; then
-    proxy="${proxy%/}"
-  else
-    proxy="https://${proxy%/}"
+  local preference=""
+  if [[ "$mode" == "false" || "$mode" == "direct" ]]; then
+    RESOLVED_URL_PREFIX=""
+    RESOLVED_URL_PREFIX_DONE="1"
+    record_route "direct" "skipped" "  （未探测：PROXY_ENABLED=${mode}）"
+    echo ""
+    return
   fi
 
-  echo "${proxy}/${url}"
+  local arch
+  arch=$(get_architecture)
+  local target="https://github.com/${REPO}/releases/latest/download/gost-${arch}"
+
+  # 候选：直连 + 面板配置的代理 + 内置候选
+  local -a prefixes=() speeds=()
+  prefixes+=("")
+  preference=$(normalize_proxy_prefix "$PROXY_URL")
+  [[ -n "$preference" ]] && prefixes+=("$preference")
+  local candidate
+  for candidate in $PROXY_CANDIDATES; do
+    candidate=$(normalize_proxy_prefix "$candidate")
+    [[ -n "$candidate" ]] && prefixes+=("$candidate")
+  done
+
+  # 去重
+  local -a uniq=()
+  local seen=" "
+  for candidate in "${prefixes[@]}"; do
+    if [[ "$seen" != *" $candidate "* ]]; then
+      uniq+=("$candidate")
+      seen="$seen$candidate "
+    fi
+  done
+  prefixes=("${uniq[@]}")
+
+  if [[ ${#prefixes[@]} -eq 1 ]]; then
+    RESOLVED_URL_PREFIX="${prefixes[0]}"
+    RESOLVED_URL_PREFIX_DONE="1"
+    record_route "${prefixes[0]}" "skipped" "  （未探测：只有一个候选）"
+    echo "$RESOLVED_URL_PREFIX"
+    return
+  fi
+
+
+  echo "🔍 正在探测最快的下载线路（直连 + ${#prefixes[@]} 个候选，最多 ${PROBE_TIMEOUT}s）..." >&2
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local i=0
+  for candidate in "${prefixes[@]}"; do
+    (
+      local url="$target"
+      [[ -n "$candidate" ]] && url="${candidate}/${target}"
+      probe_speed "$url" >"$tmpdir/$i" 2>/dev/null
+    ) &
+    i=$((i + 1))
+  done
+  wait
+
+  local best_prefix="" best_speed=0 idx=0
+  local probe_table=""
+  for candidate in "${prefixes[@]}"; do
+    local spd label
+    spd=$(cat "$tmpdir/$idx" 2>/dev/null || echo 0)
+    [[ -z "$spd" ]] && spd=0
+    label="${candidate:-直连}"
+    echo "   $label: ${spd} KB/s" >&2
+    probe_table="${probe_table}  ${label} = ${spd} KB/s
+"
+    if [[ "$spd" -gt "$best_speed" ]]; then
+      best_speed="$spd"
+      best_prefix="$candidate"
+    fi
+    idx=$((idx + 1))
+  done
+  rm -rf "$tmpdir"
+
+  if [[ "$best_speed" -le 0 ]]; then
+    # 全部探测失败：按保守顺序回退（仍优先代理，因为多数失败场景在受限网络）
+    best_prefix="${preference:-${prefixes[1]:-}}"
+    echo "⚠️  所有线路探测均失败，回退：${best_prefix:-直连}" >&2
+    record_route "$best_prefix" "0(fallback)" "$probe_table"
+  else
+    echo "✅ 选用：${best_prefix:-直连}（${best_speed} KB/s）" >&2
+  fi
+
+  record_route "$best_prefix" "$best_speed" "$probe_table"
+
+  RESOLVED_URL_PREFIX="$best_prefix"
+  RESOLVED_URL_PREFIX_DONE="1"
+  echo "$RESOLVED_URL_PREFIX"
+}
+
+# 拼接下载地址（自动选择最快线路）
+maybe_proxy_url() {
+  local url="$1"
+  local prefix
+  prefix=$(resolve_url_prefix)
+  if [[ -z "$prefix" ]]; then
+    echo "$url"
+  else
+    echo "${prefix}/${url}"
+  fi
 }
 
 ask_proxy_config() {
@@ -128,9 +281,9 @@ ask_proxy_config() {
 
   echo ""
   echo "==============================================="
-  echo "           GitHub 加速配置"
+  echo "           GitHub 下载线路"
   echo "==============================================="
-  if ! read -r -p "是否开启 GitHub 加速? (Y/n): " proxy_choice; then
+  if ! read -r -p "自动选择最快线路（直连/镜像测速对比）? (Y/n): " proxy_choice; then
     proxy_choice=""
   fi
   case "$proxy_choice" in
@@ -139,12 +292,12 @@ ask_proxy_config() {
       echo "已关闭加速，将直连 GitHub"
       ;;
     *)
-      PROXY_ENABLED="true"
-      if ! read -r -p "加速地址 (默认 gcode.hostcentral.cc): " input_url; then
+      PROXY_ENABLED="auto"
+      if ! read -r -p "额外候选加速地址（可留空，默认 gh-proxy.com 等）: " input_url; then
         input_url=""
       fi
-      PROXY_URL="${input_url:-gcode.hostcentral.cc}"
-      echo "已开启加速: $PROXY_URL"
+      [[ -n "$input_url" ]] && PROXY_URL="$input_url"
+      echo "已开启自动选择（直连 + 镜像测速）"
       ;;
   esac
   echo "==============================================="

@@ -43,6 +43,32 @@ TMP_DIR=""
 
 log() { printf '%s\n' "$*"; }
 die() { printf '❌ %s\n' "$*" >&2; exit 1; }
+
+# 把加速地址规范成 "https://host"（无尾斜杠）
+normalize_proxy_prefix() {
+	local proxy="$1"
+	[ -z "$proxy" ] && return 0
+	case "$proxy" in
+	http://* | https://*) ;;
+	*) proxy="https://$proxy" ;;
+	esac
+	printf '%s' "${proxy%/}"
+}
+
+# 测速：输出整数 KB/s，失败输出 0
+probe_speed() {
+	local url="$1" out code speed
+	out=$(curl -sL -m "${PROBE_TIMEOUT:-6}" -r "0-$(((${PROBE_BYTES:-262144}) - 1))" \
+		-o /dev/null -w '%{http_code} %{speed_download}' "$url" 2>/dev/null || true)
+	set -- $out
+	code="${1:-000}"
+	speed="${2:-0}"
+	case "$code" in
+	200 | 206) awk -v s="$speed" 'BEGIN { printf "%d", s / 1024 }' ;;
+	*) echo 0 ;;
+	esac
+}
+
 need_root() { [ "$(id -u)" = "0" ] || die "请用 root 执行（sudo bash $0 ...）"; }
 cleanup() { [ -n "$TMP_DIR" ] && rm -rf "$TMP_DIR" || true; }
 trap cleanup EXIT
@@ -163,6 +189,55 @@ fetch_binary() {
 			fi
 		fi
 		die "下载 release 资产失败（asset=${asset}）"
+	fi
+
+	# 2.5) 自动探测：直连 vs 候选镜像，选最快的（PROXY_MODE=direct 可关闭）
+	local mode="${PROXY_MODE:-auto}"
+	if [ "$mode" != "direct" ]; then
+		local target_url="https://github.com/${REPO}/releases/download/${VERSION:-latest}/${asset}"
+		[ -z "$VERSION" ] && target_url="https://github.com/${REPO}/releases/latest/download/${asset}"
+
+		log "▶ 探测下载线路（直连 + 镜像）"
+		local best="" best_speed=0 direct_speed
+		direct_speed=$(probe_speed "$target_url")
+		log "   直连: ${direct_speed} KB/s"
+		best_speed=$direct_speed
+
+		local cand spd
+		for cand in ${PROXY_URL:-} ${PROXY_CANDIDATES:-https://gh-proxy.com https://ghfast.top https://githubproxy.cc}; do
+			[ -z "$cand" ] && continue
+			cand=$(normalize_proxy_prefix "$cand")
+			spd=$(probe_speed "${cand}/${target_url}")
+			log "   ${cand}: ${spd} KB/s"
+			if [ "$spd" -gt "$best_speed" ]; then
+				best_speed=$spd
+				best=$cand
+			fi
+		done
+
+		mkdir -p "$CONF_DIR" 2>/dev/null || true
+		{
+			echo "# FLVX 面板安装时的下载线路探测结果"
+			echo "time=$(date -Is 2>/dev/null || date)"
+			echo "repo=${REPO}"
+			echo "chosen=${best:-direct}"
+			echo "speed_kbps=${best_speed}"
+			echo "direct_kbps=${direct_speed}"
+		} >"$CONF_DIR/install-route.txt" 2>/dev/null || true
+		if command -v systemd-cat >/dev/null 2>&1; then
+			printf 'route: chosen=%s speed=%sKB/s (direct %sKB/s)\n' "${best:-direct}" "$best_speed" "$direct_speed" \
+				| systemd-cat -t flvx-install -p info 2>/dev/null || true
+		fi
+
+		if [ "$best_speed" -gt 0 ]; then
+			if [ -n "$best" ]; then
+				log "▶ 选用镜像：${best}（${best_speed} KB/s）"
+				curl -fL --retry 3 -o "$target" "${best}/${target_url}" && return 0
+			else
+				log "▶ 选用直连（${direct_speed} KB/s）"
+				curl -fL --retry 3 -o "$target" "$target_url" && return 0
+			fi
+		fi
 	fi
 
 	# 3) 公开仓库：直链
