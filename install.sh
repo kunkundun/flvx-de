@@ -165,7 +165,16 @@ resolve_url_prefix() {
   [[ -z "$mode" ]] && mode="auto"
   [[ "$mode" == "true" ]] && mode="auto"
 
-  local preference=""
+  local preference
+  preference=$(normalize_proxy_prefix "$PROXY_URL")
+  if [[ "$mode" == "proxy" ]]; then
+    RESOLVED_URL_PREFIX="$preference"
+    RESOLVED_URL_PREFIX_DONE="1"
+    record_route "${preference:-direct}" "skipped" "  （未探测：PROXY_ENABLED=proxy）"
+    echo "$RESOLVED_URL_PREFIX"
+    return
+  fi
+
   if [[ "$mode" == "false" || "$mode" == "direct" ]]; then
     RESOLVED_URL_PREFIX=""
     RESOLVED_URL_PREFIX_DONE="1"
@@ -181,7 +190,6 @@ resolve_url_prefix() {
   # 候选：直连 + 面板配置的代理 + 内置候选
   local -a prefixes=() speeds=()
   prefixes+=("")
-  preference=$(normalize_proxy_prefix "$PROXY_URL")
   [[ -n "$preference" ]] && prefixes+=("$preference")
   local candidate
   for candidate in $PROXY_CANDIDATES; do

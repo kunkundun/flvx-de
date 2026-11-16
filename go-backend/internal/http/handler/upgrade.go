@@ -20,8 +20,10 @@ type failedForward struct {
 	err     error
 }
 
+// githubRepo 支持在构建时用 -ldflags -X 覆盖（发布构建注入实际仓库）
+var githubRepo = "kunkundun/flvx-de"
+
 const (
-	githubRepo     = "kunkundun/flvx-de"
 	githubAPIBase  = "https://api.github.com"
 	githubHTMLBase = "https://github.com"
 	upgradeTimeout = 5 * time.Minute

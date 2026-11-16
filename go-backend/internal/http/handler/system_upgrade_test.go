@@ -25,6 +25,7 @@ func TestSelectComposeAssetUsesIPv6Template(t *testing.T) {
 }
 
 func TestDownloadReleaseAssetUsesGithubProxyWhenEnabled(t *testing.T) {
+	useUpstreamRepoForTest(t)
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	repoStore, err := repo.Open(dbPath)
 	if err != nil {
@@ -238,4 +239,13 @@ func TestSystemUpgradeVersionDataSurfacesLookupFailureReason(t *testing.T) {
 	if !strings.Contains(string(data), `"reason":"GitHub unavailable"`) {
 		t.Fatalf("expected reason field in JSON, got %s", string(data))
 	}
+}
+
+// useUpstreamRepoForTest pins githubRepo to the fixtures' repository name and
+// restores the build-time value afterwards.
+func useUpstreamRepoForTest(t *testing.T) {
+	t.Helper()
+	old := githubRepo
+	githubRepo = "Sagit-chu/flvx"
+	t.Cleanup(func() { githubRepo = old })
 }
