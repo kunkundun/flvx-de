@@ -766,15 +766,6 @@ install_flux_agent() {
 
   local tmp_binary="$INSTALL_DIR/flux_agent.new"
 
-  # 停止并禁用已有服务
-  if flux_agent_service_exists; then
-    echo "🔍 检测到已存在的flux_agent服务"
-    stop_flux_agent_service
-    echo "🛑 停止服务"
-    disable_flux_agent_service
-    echo "🚫 禁用自启"
-  fi
-
   # 下载 flux_agent
   echo "⬇️ 下载 flux_agent 中..."
   rm -f "$tmp_binary"
@@ -785,9 +776,20 @@ install_flux_agent() {
     exit 1
   fi
   cleanup_legacy_gost_installation
+  echo "✅ 下载完成"
+
+  # 新二进制已就绪，此时才停服务替换：下载慢时节点不会提前离线
+  # 停止并禁用已有服务
+  if flux_agent_service_exists; then
+    echo "🔍 检测到已存在的flux_agent服务"
+    stop_flux_agent_service
+    echo "🛑 停止服务"
+    disable_flux_agent_service
+    echo "🚫 禁用自启"
+  fi
+
   mv "$tmp_binary" "$INSTALL_DIR/flux_agent"
   chmod +x "$INSTALL_DIR/flux_agent"
-  echo "✅ 下载完成"
 
   # 打印版本
   echo "🔎 flux_agent 版本：$($INSTALL_DIR/flux_agent -V)"
